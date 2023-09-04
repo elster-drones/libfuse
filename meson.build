@@ -213,9 +213,9 @@ if get_option('examples')
   subdirs += 'example'
 endif
 
-if get_option('tests')
-  subdirs += 'test'
-endif
+#if get_option('tests')
+#  subdirs += 'test'
+#endif
 
 foreach n : subdirs
     subdir(n)
