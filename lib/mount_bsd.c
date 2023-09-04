@@ -2,19 +2,13 @@
   FUSE: Filesystem in Userspace
   Copyright (C) 2005-2008 Csaba Henk <csaba.henk@creo.hu>
 
-  Architecture specific file system mounting (FreeBSD).
-
   This program can be distributed under the terms of the GNU LGPLv2.
   See the file COPYING.LIB.
 */
 
-#include "config.h"
 #include "fuse_i.h"
 #include "fuse_misc.h"
 #include "fuse_opt.h"
-
-#include <sys/param.h>
-#include "fuse_mount_compat.h"
 
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -34,23 +28,32 @@
 #define FUSE_DEV_TRUNK		"/dev/fuse"
 
 enum {
+	KEY_ALLOW_ROOT,
 	KEY_RO,
+	KEY_HELP,
+	KEY_VERSION,
 	KEY_KERN
 };
 
 struct mount_opts {
 	int allow_other;
+	int allow_root;
+	int ishelp;
 	char *kernel_opts;
-	unsigned max_read;
 };
 
-#define FUSE_DUAL_OPT_KEY(templ, key)				\
+#define FUSE_DUAL_OPT_KEY(templ, key) 				\
 	FUSE_OPT_KEY(templ, key), FUSE_OPT_KEY("no" templ, key)
 
 static const struct fuse_opt fuse_mount_opts[] = {
 	{ "allow_other", offsetof(struct mount_opts, allow_other), 1 },
-	{ "max_read=%u", offsetof(struct mount_opts, max_read), 1 },
+	{ "allow_root", offsetof(struct mount_opts, allow_root), 1 },
+	FUSE_OPT_KEY("allow_root",		KEY_ALLOW_ROOT),
 	FUSE_OPT_KEY("-r",			KEY_RO),
+	FUSE_OPT_KEY("-h",			KEY_HELP),
+	FUSE_OPT_KEY("--help",			KEY_HELP),
+	FUSE_OPT_KEY("-V",			KEY_VERSION),
+	FUSE_OPT_KEY("--version",		KEY_VERSION),
 	/* standard FreeBSD mount options */
 	FUSE_DUAL_OPT_KEY("dev",		KEY_KERN),
 	FUSE_DUAL_OPT_KEY("async",		KEY_KERN),
@@ -75,7 +78,6 @@ static const struct fuse_opt fuse_mount_opts[] = {
 	FUSE_DUAL_OPT_KEY("ro",			KEY_KERN),
 	FUSE_DUAL_OPT_KEY("rw",			KEY_KERN),
 	FUSE_DUAL_OPT_KEY("auto",		KEY_KERN),
-	FUSE_DUAL_OPT_KEY("automounted",	KEY_KERN),
 	/* options supported under both Linux and FBSD */
 	FUSE_DUAL_OPT_KEY("allow_other",	KEY_KERN),
 	FUSE_DUAL_OPT_KEY("default_permissions",KEY_KERN),
@@ -86,58 +88,167 @@ static const struct fuse_opt fuse_mount_opts[] = {
 	FUSE_DUAL_OPT_KEY("neglect_shares",	KEY_KERN),
 	FUSE_DUAL_OPT_KEY("push_symlinks_in",	KEY_KERN),
 	FUSE_OPT_KEY("nosync_unmount",		KEY_KERN),
-#if __FreeBSD_version >= 1200519
-	FUSE_DUAL_OPT_KEY("intr",		KEY_KERN),
-#endif
 	/* stock FBSD mountopt parsing routine lets anything be negated... */
 	/*
 	 * Linux specific mount options, but let just the mount util
 	 * handle them
 	 */
 	FUSE_OPT_KEY("fsname=",			KEY_KERN),
+	FUSE_OPT_KEY("nonempty",		KEY_KERN),
+	FUSE_OPT_KEY("large_read",		KEY_KERN),
 	FUSE_OPT_END
 };
 
-void fuse_mount_version(void)
+static void mount_help(void)
 {
-	system(FUSERMOUNT_PROG " --version");
+	fprintf(stderr,
+		"    -o allow_root          allow access to root\n"
+		);
+	system(FUSERMOUNT_PROG " --help");
+	fputc('\n', stderr);
 }
 
-unsigned get_max_read(struct mount_opts *o)
+static void mount_version(void)
 {
-	return o->max_read;
+	system(FUSERMOUNT_PROG " --version");
 }
 
 static int fuse_mount_opt_proc(void *data, const char *arg, int key,
 			       struct fuse_args *outargs)
 {
-	(void) outargs;
 	struct mount_opts *mo = data;
 
 	switch (key) {
+	case KEY_ALLOW_ROOT:
+		if (fuse_opt_add_opt(&mo->kernel_opts, "allow_other") == -1 ||
+		    fuse_opt_add_arg(outargs, "-oallow_root") == -1)
+			return -1;
+		return 0;
+
 	case KEY_RO:
 		arg = "ro";
 		/* fall through */
 
 	case KEY_KERN:
 		return fuse_opt_add_opt(&mo->kernel_opts, arg);
+
+	case KEY_HELP:
+		mount_help();
+		mo->ishelp = 1;
+		break;
+
+	case KEY_VERSION:
+		mount_version();
+		mo->ishelp = 1;
+		break;
+	}
+	return 1;
+}
+
+void fuse_unmount_compat22(const char *mountpoint)
+{
+	char dev[128];
+	char *ssc, *umount_cmd;
+	FILE *sf;
+	int rv;
+	char seekscript[] =
+		/* error message is annoying in help output */
+		"exec 2>/dev/null; "
+		"/usr/bin/fstat " FUSE_DEV_TRUNK "* | "
+		"/usr/bin/awk 'BEGIN{ getline; if (! ($3 == \"PID\" && $10 == \"NAME\")) exit 1; }; "
+		"              { if ($3 == %d) print $10; }' | "
+		"/usr/bin/sort | "
+		"/usr/bin/uniq | "
+		"/usr/bin/awk '{ i += 1; if (i > 1){ exit 1; }; printf; }; END{ if (i == 0) exit 1; }'";
+
+	(void) mountpoint;
+
+	/*
+	 * If we don't know the fd, we have to resort to the scripted
+	 * solution -- iterating over the fd-s is unpractical, as we
+	 * don't know how many of open files we have. (This could be
+	 * looked up in procfs -- however, that's optional on FBSD; or
+	 * read out from the kmem -- however, that's bound to
+	 * privileges (in fact, that's what happens when we call the
+	 * setgid kmem fstat(1) utility).
+	 */
+	if (asprintf(&ssc, seekscript, getpid()) == -1)
+		return;
+
+	errno = 0;
+	sf = popen(ssc, "r");
+	free(ssc);
+	if (! sf)
+		return;
+
+	fgets(dev, sizeof(dev), sf);
+	rv = pclose(sf);
+	if (rv)
+		return;
+
+	if (asprintf(&umount_cmd, "/sbin/umount %s", dev) == -1)
+		return;
+	system(umount_cmd);
+	free(umount_cmd);
+}
+
+static void do_unmount(char *dev, int fd)
+{
+	char device_path[SPECNAMELEN + 12];
+	const char *argv[4];
+	const char umount_cmd[] = "/sbin/umount";
+	pid_t pid;
+
+	snprintf(device_path, SPECNAMELEN + 12, _PATH_DEV "%s", dev);
+
+	argv[0] = umount_cmd;
+	argv[1] = "-f";
+	argv[2] = device_path;
+	argv[3] = NULL;
+
+	pid = fork();
+
+	if (pid == -1)
+		return;
+
+	if (pid == 0) {
+		close(fd);
+		execvp(umount_cmd, (char **)argv);
+		exit(1);
 	}
 
-	/* Pass through unknown options */
-	return 1;
+	waitpid(pid, NULL, 0);
 }
 
 void fuse_kern_unmount(const char *mountpoint, int fd)
 {
+	char *ep, dev[128];
+	struct stat sbuf;
+
+	(void)mountpoint;
+
+	if (fstat(fd, &sbuf) == -1)
+		goto out;
+
+	devname_r(sbuf.st_rdev, S_IFCHR, dev, 128);
+
+	if (strncmp(dev, "fuse", 4))
+		goto out;
+
+	strtol(dev + 4, &ep, 10);
+	if (*ep != '\0')
+		goto out;
+
+	do_unmount(dev, fd);
+
+out:
 	close(fd);
-	unmount(mountpoint, MNT_FORCE);
 }
 
 /* Check if kernel is doing init in background */
 static int init_backgrounded(void)
 {
-	unsigned ibg;
-	size_t len;
+	unsigned ibg, len;
 
 	len = sizeof(ibg);
 
@@ -164,7 +275,7 @@ static int fuse_mount_core(const char *mountpoint, const char *opts)
 		fd = strtol(fdnam, &ep, 10);
 
 		if (*ep != '\0') {
-			fuse_log(FUSE_LOG_ERR, "invalid value given in FUSE_DEV_FD\n");
+			fprintf(stderr, "invalid value given in FUSE_DEV_FD\n");
 			return -1;
 		}
 
@@ -217,17 +328,10 @@ mount:
 		if (pid == 0) {
 			const char *argv[32];
 			int a = 0;
-			int ret = -1; 
-			
-			if (! fdnam)
-			{
-				ret = asprintf(&fdnam, "%d", fd); 
-				if(ret == -1)
-				{
-					perror("fuse: failed to assemble mount arguments");
-					close(fd);
-					exit(1);
-				}
+
+			if (! fdnam && asprintf(&fdnam, "%d", fd) == -1) {
+				perror("fuse: failed to assemble mount arguments");
+				exit(1);
 			}
 
 			argv[a++] = mountprog;
@@ -240,7 +344,6 @@ mount:
 			argv[a++] = NULL;
 			execvp(mountprog, (char **) argv);
 			perror("fuse: failed to exec mount program");
-			free(fdnam);
 			exit(1);
 		}
 
@@ -257,39 +360,32 @@ out:
 	return fd;
 }
 
-struct mount_opts *parse_mount_opts(struct fuse_args *args)
+int fuse_kern_mount(const char *mountpoint, struct fuse_args *args)
 {
-	struct mount_opts *mo;
+	struct mount_opts mo;
+	int res = -1;
 
-	mo = (struct mount_opts*) malloc(sizeof(struct mount_opts));
-	if (mo == NULL)
-		return NULL;
-
-	memset(mo, 0, sizeof(struct mount_opts));
-
-	if (args &&
-	    fuse_opt_parse(args, mo, fuse_mount_opts, fuse_mount_opt_proc) == -1)
-		goto err_out;
-
-	return mo;
-
-err_out:
-	destroy_mount_opts(mo);
-	return NULL;
-}
-
-void destroy_mount_opts(struct mount_opts *mo)
-{
-	free(mo->kernel_opts);
-	free(mo);
-}
-
-int fuse_kern_mount(const char *mountpoint, struct mount_opts *mo)
-{
+	memset(&mo, 0, sizeof(mo));
 	/* mount util should not try to spawn the daemon */
 	setenv("MOUNT_FUSEFS_SAFE", "1", 1);
 	/* to notify the mount util it's called from lib */
 	setenv("MOUNT_FUSEFS_CALL_BY_LIB", "1", 1);
 
-	return fuse_mount_core(mountpoint, mo->kernel_opts);
+	if (args &&
+	    fuse_opt_parse(args, &mo, fuse_mount_opts, fuse_mount_opt_proc) == -1)
+		return -1;
+
+	if (mo.allow_other && mo.allow_root) {
+		fprintf(stderr, "fuse: 'allow_other' and 'allow_root' options are mutually exclusive\n");
+		goto out;
+	}
+	if (mo.ishelp)
+		return 0;
+
+	res = fuse_mount_core(mountpoint, mo.kernel_opts);
+out:
+	free(mo.kernel_opts);
+	return res;
 }
+
+FUSE_SYMVER(".symver fuse_unmount_compat22,fuse_unmount@FUSE_2.2");

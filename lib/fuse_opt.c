@@ -2,15 +2,10 @@
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
 
-  Implementation of option parsing routines (dealing with `struct
-  fuse_args`).
-
   This program can be distributed under the terms of the GNU LGPLv2.
   See the file COPYING.LIB
 */
 
-#include "fuse_config.h"
-#include "fuse_i.h"
 #include "fuse_opt.h"
 #include "fuse_misc.h"
 
@@ -48,7 +43,7 @@ void fuse_opt_free_args(struct fuse_args *args)
 
 static int alloc_failed(void)
 {
-	fuse_log(FUSE_LOG_ERR, "fuse: memory allocation failed\n");
+	fprintf(stderr, "fuse: memory allocation failed\n");
 	return -1;
 }
 
@@ -97,10 +92,17 @@ int fuse_opt_insert_arg(struct fuse_args *args, int pos, const char *arg)
 	return fuse_opt_insert_arg_common(args, pos, arg);
 }
 
+int fuse_opt_insert_arg_compat(struct fuse_args *args, int pos,
+			       const char *arg);
+int fuse_opt_insert_arg_compat(struct fuse_args *args, int pos, const char *arg)
+{
+	return fuse_opt_insert_arg_common(args, pos, arg);
+}
+
 static int next_arg(struct fuse_opt_context *ctx, const char *opt)
 {
 	if (ctx->argctr + 1 >= ctx->argc) {
-		fuse_log(FUSE_LOG_ERR, "fuse: missing argument after `%s'\n", opt);
+		fprintf(stderr, "fuse: missing argument after `%s'\n", opt);
 		return -1;
 	}
 	ctx->argctr++;
@@ -209,16 +211,14 @@ static int process_opt_param(void *var, const char *format, const char *param,
 {
 	assert(format[0] == '%');
 	if (format[1] == 's') {
-		char **s = var;
 		char *copy = strdup(param);
 		if (!copy)
 			return alloc_failed();
 
-		free(*s);
-		*s = copy;
+		*(char **) var = copy;
 	} else {
 		if (sscanf(param, format, var) != 1) {
-			fuse_log(FUSE_LOG_ERR, "fuse: invalid parameter in option `%s'\n", arg);
+			fprintf(stderr, "fuse: invalid parameter in option `%s'\n", arg);
 			return -1;
 		}
 	}
@@ -233,7 +233,7 @@ static int process_opt(struct fuse_opt_context *ctx,
 		if (call_proc(ctx, arg, opt->value, iso) == -1)
 			return -1;
 	} else {
-		void *var = (char *)ctx->data + opt->offset;
+		void *var = ctx->data + opt->offset;
 		if (sep && opt->templ[sep + 1]) {
 			const char *param = arg + sep;
 			if (opt->templ[sep] == '=')
@@ -337,7 +337,7 @@ static int process_option_group(struct fuse_opt_context *ctx, const char *opts)
 	char *copy = strdup(opts);
 
 	if (!copy) {
-		fuse_log(FUSE_LOG_ERR, "fuse: memory allocation failed\n");
+		fprintf(stderr, "fuse: memory allocation failed\n");
 		return -1;
 	}
 	res = process_real_option_group(ctx, copy);
@@ -421,3 +421,6 @@ int fuse_opt_parse(struct fuse_args *args, void *data,
 	fuse_opt_free_args(&ctx.outargs);
 	return res;
 }
+
+/* This symbol version was mistakenly added to the version script */
+FUSE_SYMVER(".symver fuse_opt_insert_arg_compat,fuse_opt_insert_arg@FUSE_2.5");

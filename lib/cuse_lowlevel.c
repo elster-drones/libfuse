@@ -7,11 +7,11 @@
   See the file COPYING.LIB.
 */
 
-#include "fuse_config.h"
 #include "cuse_lowlevel.h"
 #include "fuse_kernel.h"
 #include "fuse_i.h"
 #include "fuse_opt.h"
+#include "fuse_misc.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +32,7 @@ struct cuse_data {
 
 static struct cuse_lowlevel_ops *req_clop(fuse_req_t req)
 {
-	return &req->se->cuse_data->clop;
+	return &req->f->cuse_data->clop;
 }
 
 static void cuse_fll_open(fuse_req_t req, fuse_ino_t ino,
@@ -77,9 +77,9 @@ static void cuse_fll_fsync(fuse_req_t req, fuse_ino_t ino, int datasync,
 	req_clop(req)->fsync(req, datasync, fi);
 }
 
-static void cuse_fll_ioctl(fuse_req_t req, fuse_ino_t ino, unsigned int cmd, void *arg,
-			   struct fuse_file_info *fi, unsigned int flags,
-			   const void *in_buf, size_t in_bufsz, size_t out_bufsz)
+static void cuse_fll_ioctl(fuse_req_t req, fuse_ino_t ino, int cmd, void *arg,
+		       struct fuse_file_info *fi, unsigned int flags,
+		       const void *in_buf, size_t in_bufsz, size_t out_bufsz)
 {
 	(void)ino;
 	req_clop(req)->ioctl(req, cmd, arg, fi, flags, in_buf, in_bufsz,
@@ -122,14 +122,14 @@ static struct cuse_data *cuse_prep_data(const struct cuse_info *ci,
 				      NULL);
 
 	if (dev_info_len > CUSE_INIT_INFO_MAX) {
-		fuse_log(FUSE_LOG_ERR, "cuse: dev_info (%zu) too large, limit=%u\n",
+		fprintf(stderr, "cuse: dev_info (%zu) too large, limit=%u\n",
 			dev_info_len, CUSE_INIT_INFO_MAX);
 		return NULL;
 	}
 
 	cd = calloc(1, sizeof(*cd) + dev_info_len);
 	if (!cd) {
-		fuse_log(FUSE_LOG_ERR, "cuse: failed to allocate cuse_data\n");
+		fprintf(stderr, "cuse: failed to allocate cuse_data\n");
 		return NULL;
 	}
 
@@ -152,6 +152,7 @@ struct fuse_session *cuse_lowlevel_new(struct fuse_args *args,
 	struct fuse_lowlevel_ops lop;
 	struct cuse_data *cd;
 	struct fuse_session *se;
+	struct fuse_ll *ll;
 
 	cd = cuse_prep_data(ci, clop);
 	if (!cd)
@@ -169,12 +170,13 @@ struct fuse_session *cuse_lowlevel_new(struct fuse_args *args,
 	lop.ioctl	= clop->ioctl		? cuse_fll_ioctl	: NULL;
 	lop.poll	= clop->poll		? cuse_fll_poll		: NULL;
 
-	se = fuse_session_new(args, &lop, sizeof(lop), userdata);
+	se = fuse_lowlevel_new_common(args, &lop, sizeof(lop), userdata);
 	if (!se) {
 		free(cd);
 		return NULL;
 	}
-	se->cuse_data = cd;
+	ll = se->data;
+	ll->cuse_data = cd;
 
 	return se;
 }
@@ -196,67 +198,67 @@ void cuse_lowlevel_init(fuse_req_t req, fuse_ino_t nodeid, const void *inarg)
 {
 	struct fuse_init_in *arg = (struct fuse_init_in *) inarg;
 	struct cuse_init_out outarg;
-	struct fuse_session *se = req->se;
-	struct cuse_data *cd = se->cuse_data;
-	size_t bufsize = se->bufsize;
+	struct fuse_ll *f = req->f;
+	struct cuse_data *cd = f->cuse_data;
+	size_t bufsize = fuse_chan_bufsize(req->ch);
 	struct cuse_lowlevel_ops *clop = req_clop(req);
 
 	(void) nodeid;
-	if (se->debug) {
-		fuse_log(FUSE_LOG_DEBUG, "CUSE_INIT: %u.%u\n", arg->major, arg->minor);
-		fuse_log(FUSE_LOG_DEBUG, "flags=0x%08x\n", arg->flags);
+	if (f->debug) {
+		fprintf(stderr, "CUSE_INIT: %u.%u\n", arg->major, arg->minor);
+		fprintf(stderr, "flags=0x%08x\n", arg->flags);
 	}
-	se->conn.proto_major = arg->major;
-	se->conn.proto_minor = arg->minor;
-	se->conn.capable = 0;
-	se->conn.want = 0;
+	f->conn.proto_major = arg->major;
+	f->conn.proto_minor = arg->minor;
+	f->conn.capable = 0;
+	f->conn.want = 0;
 
 	if (arg->major < 7) {
-		fuse_log(FUSE_LOG_ERR, "cuse: unsupported protocol version: %u.%u\n",
+		fprintf(stderr, "cuse: unsupported protocol version: %u.%u\n",
 			arg->major, arg->minor);
 		fuse_reply_err(req, EPROTO);
 		return;
 	}
 
 	if (bufsize < FUSE_MIN_READ_BUFFER) {
-		fuse_log(FUSE_LOG_ERR, "cuse: warning: buffer size too small: %zu\n",
+		fprintf(stderr, "cuse: warning: buffer size too small: %zu\n",
 			bufsize);
 		bufsize = FUSE_MIN_READ_BUFFER;
 	}
 
 	bufsize -= 4096;
-	if (bufsize < se->conn.max_write)
-		se->conn.max_write = bufsize;
+	if (bufsize < f->conn.max_write)
+		f->conn.max_write = bufsize;
 
-	se->got_init = 1;
-	if (se->op.init)
-		se->op.init(se->userdata, &se->conn);
+	f->got_init = 1;
+	if (f->op.init)
+		f->op.init(f->userdata, &f->conn);
 
 	memset(&outarg, 0, sizeof(outarg));
 	outarg.major = FUSE_KERNEL_VERSION;
 	outarg.minor = FUSE_KERNEL_MINOR_VERSION;
 	outarg.flags = cd->flags;
 	outarg.max_read = cd->max_read;
-	outarg.max_write = se->conn.max_write;
+	outarg.max_write = f->conn.max_write;
 	outarg.dev_major = cd->dev_major;
 	outarg.dev_minor = cd->dev_minor;
 
-	if (se->debug) {
-		fuse_log(FUSE_LOG_DEBUG, "   CUSE_INIT: %u.%u\n",
+	if (f->debug) {
+		fprintf(stderr, "   CUSE_INIT: %u.%u\n",
 			outarg.major, outarg.minor);
-		fuse_log(FUSE_LOG_DEBUG, "   flags=0x%08x\n", outarg.flags);
-		fuse_log(FUSE_LOG_DEBUG, "   max_read=0x%08x\n", outarg.max_read);
-		fuse_log(FUSE_LOG_DEBUG, "   max_write=0x%08x\n", outarg.max_write);
-		fuse_log(FUSE_LOG_DEBUG, "   dev_major=%u\n", outarg.dev_major);
-		fuse_log(FUSE_LOG_DEBUG, "   dev_minor=%u\n", outarg.dev_minor);
-		fuse_log(FUSE_LOG_DEBUG, "   dev_info: %.*s\n", cd->dev_info_len,
+		fprintf(stderr, "   flags=0x%08x\n", outarg.flags);
+		fprintf(stderr, "   max_read=0x%08x\n", outarg.max_read);
+		fprintf(stderr, "   max_write=0x%08x\n", outarg.max_write);
+		fprintf(stderr, "   dev_major=%u\n", outarg.dev_major);
+		fprintf(stderr, "   dev_minor=%u\n", outarg.dev_minor);
+		fprintf(stderr, "   dev_info: %.*s\n", cd->dev_info_len,
 			cd->dev_info);
 	}
 
 	cuse_reply_init(req, &outarg, cd->dev_info, cd->dev_info_len);
 
 	if (clop->init_done)
-		clop->init_done(se->userdata);
+		clop->init_done(f->userdata);
 
 	fuse_free_req(req);
 }
@@ -273,18 +275,18 @@ struct fuse_session *cuse_lowlevel_setup(int argc, char *argv[],
 	};
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
 	struct fuse_session *se;
-	struct fuse_cmdline_opts opts;
+	struct fuse_chan *ch;
 	int fd;
+	int foreground;
 	int res;
 
-	if (fuse_parse_cmdline(&args, &opts) == -1)
-		return NULL;
-	*multithreaded = !opts.singlethread;
+	res = fuse_parse_cmdline(&args, NULL, multithreaded, &foreground);
+	if (res == -1)
+		goto err_args;
 
-	/* Remove subtype= option */
 	res = fuse_opt_parse(&args, NULL, kill_subtype_opts, NULL);
 	if (res == -1)
-		goto out1;
+		goto err_args;
 
 	/*
 	 * Make sure file descriptors 0, 1 and 2 are open, otherwise chaos
@@ -297,37 +299,43 @@ struct fuse_session *cuse_lowlevel_setup(int argc, char *argv[],
 	} while (fd >= 0 && fd <= 2);
 
 	se = cuse_lowlevel_new(&args, ci, clop, userdata);
+	fuse_opt_free_args(&args);
 	if (se == NULL)
-		goto out1;
+		goto err_args;
 
 	fd = open(devname, O_RDWR);
 	if (fd == -1) {
 		if (errno == ENODEV || errno == ENOENT)
-			fuse_log(FUSE_LOG_ERR, "cuse: device not found, try 'modprobe cuse' first\n");
+			fprintf(stderr, "cuse: device not found, try 'modprobe cuse' first\n");
 		else
-			fuse_log(FUSE_LOG_ERR, "cuse: failed to open %s: %s\n",
+			fprintf(stderr, "cuse: failed to open %s: %s\n",
 				devname, strerror(errno));
 		goto err_se;
 	}
-	se->fd = fd;
+
+	ch = fuse_kern_chan_new(fd);
+	if (!ch) {
+		close(fd);
+		goto err_se;
+	}
+
+	fuse_session_add_chan(se, ch);
 
 	res = fuse_set_signal_handlers(se);
 	if (res == -1)
 		goto err_se;
 
-	res = fuse_daemonize(opts.foreground);
+	res = fuse_daemonize(foreground);
 	if (res == -1)
 		goto err_sig;
 
-	fuse_opt_free_args(&args);
 	return se;
 
 err_sig:
 	fuse_remove_signal_handlers(se);
 err_se:
 	fuse_session_destroy(se);
-out1:
-	free(opts.mountpoint);
+err_args:
 	fuse_opt_free_args(&args);
 	return NULL;
 }
@@ -350,11 +358,8 @@ int cuse_lowlevel_main(int argc, char *argv[], const struct cuse_info *ci,
 	if (se == NULL)
 		return 1;
 
-	if (multithreaded) {
-		struct fuse_loop_config *config = fuse_loop_cfg_create();
-		res = fuse_session_loop_mt(se, config);
-		fuse_loop_cfg_destroy(config);
-	}
+	if (multithreaded)
+		res = fuse_session_loop_mt(se);
 	else
 		res = fuse_session_loop(se);
 

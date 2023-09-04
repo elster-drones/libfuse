@@ -6,20 +6,21 @@
   See the file COPYING.LIB.
 */
 
-#ifndef FUSE_LOWLEVEL_H_
-#define FUSE_LOWLEVEL_H_
+#ifndef _FUSE_LOWLEVEL_H_
+#define _FUSE_LOWLEVEL_H_
 
 /** @file
  *
  * Low level API
  *
  * IMPORTANT: you should define FUSE_USE_VERSION before including this
- * header.  To use the newest API define it to 35 (recommended for any
- * new application).
+ * header.  To use the newest API define it to 26 (recommended for any
+ * new application), to use the old API define it to 24 (default) or
+ * 25
  */
 
 #ifndef FUSE_USE_VERSION
-#error FUSE_USE_VERSION not defined
+#define FUSE_USE_VERSION 24
 #endif
 
 #include "fuse_common.h"
@@ -43,7 +44,7 @@ extern "C" {
 #define FUSE_ROOT_ID 1
 
 /** Inode number type */
-typedef uint64_t fuse_ino_t;
+typedef unsigned long fuse_ino_t;
 
 /** Request pointer type */
 typedef struct fuse_req *fuse_req_t;
@@ -54,6 +55,14 @@ typedef struct fuse_req *fuse_req_t;
  * This provides hooks for processing requests, and exiting
  */
 struct fuse_session;
+
+/**
+ * Channel
+ *
+ * A communication channel, providing hooks for sending and receiving
+ * messages
+ */
+struct fuse_chan;
 
 /** Directory entry parameters supplied to fuse_reply_entry() */
 struct fuse_entry_param {
@@ -75,8 +84,11 @@ struct fuse_entry_param {
 	 * it must assign a new, previously unused generation number
 	 * to the inode at the same time.
 	 *
+	 * The generation must be non-zero, otherwise FUSE will treat
+	 * it as an error.
+	 *
 	 */
-	uint64_t generation;
+	unsigned long generation;
 
 	/** Inode attributes.
 	 *
@@ -87,16 +99,10 @@ struct fuse_entry_param {
 	 */
 	struct stat attr;
 
-	/** Validity timeout (in seconds) for inode attributes. If
-	    attributes only change as a result of requests that come
-	    through the kernel, this should be set to a very large
-	    value. */
+	/** Validity timeout (in seconds) for the attributes */
 	double attr_timeout;
 
-	/** Validity timeout (in seconds) for the name. If directory
-	    entries are changed/deleted only as a result of requests
-	    that come through the kernel, this should be set to a very
-	    large value. */
+	/** Validity timeout (in seconds) for the name */
 	double entry_timeout;
 };
 
@@ -118,34 +124,13 @@ struct fuse_ctx {
 	/** Thread ID of the calling process */
 	pid_t pid;
 
-	/** Umask of the calling process */
+	/** Umask of the calling process (introduced in version 2.8) */
 	mode_t umask;
 };
 
 struct fuse_forget_data {
-	fuse_ino_t ino;
+	uint64_t ino;
 	uint64_t nlookup;
-};
-
-struct fuse_custom_io {
-	ssize_t (*writev)(int fd, struct iovec *iov, int count, void *userdata);
-	ssize_t (*read)(int fd, void *buf, size_t buf_len, void *userdata);
-	ssize_t (*splice_receive)(int fdin, off_t *offin, int fdout,
-					  off_t *offout, size_t len,
-				  	  unsigned int flags, void *userdata);
-	ssize_t (*splice_send)(int fdin, off_t *offin, int fdout,
-				     off_t *offout, size_t len,
-			           unsigned int flags, void *userdata);
-};
-
-/**
- * Flags for fuse_lowlevel_notify_entry()
- * 0 = invalidate entry
- * FUSE_LL_EXPIRE_ONLY = expire entry
-*/
-enum fuse_notify_entry_flags {
-	FUSE_LL_INVALIDATE = 0,
-	FUSE_LL_EXPIRE_ONLY	= (1 << 0),
 };
 
 /* 'to_set' flags in setattr */
@@ -157,15 +142,6 @@ enum fuse_notify_entry_flags {
 #define FUSE_SET_ATTR_MTIME	(1 << 5)
 #define FUSE_SET_ATTR_ATIME_NOW	(1 << 7)
 #define FUSE_SET_ATTR_MTIME_NOW	(1 << 8)
-#define FUSE_SET_ATTR_FORCE	(1 << 9)
-#define FUSE_SET_ATTR_CTIME	(1 << 10)
-#define FUSE_SET_ATTR_KILL_SUID	(1 << 11)
-#define FUSE_SET_ATTR_KILL_SGID	(1 << 12)
-#define FUSE_SET_ATTR_FILE	(1 << 13)
-#define FUSE_SET_ATTR_KILL_PRIV	(1 << 14)
-#define FUSE_SET_ATTR_OPEN	(1 << 15)
-#define FUSE_SET_ATTR_TIMES_SET	(1 << 16)
-#define FUSE_SET_ATTR_TOUCH	(1 << 17)
 
 /* ----------------------------------------------------------- *
  * Request methods and replies				       *
@@ -186,12 +162,6 @@ enum fuse_notify_entry_flags {
  * after the call has returned, so if they are needed later, their
  * contents have to be copied.
  *
- * In general, all methods are expected to perform any necessary
- * permission checking. However, a filesystem may delegate this task
- * to the kernel by passing the `default_permissions` mount option to
- * `fuse_session_new()`. In this case, methods will only be called if
- * the kernel's permission check has succeeded.
- *
  * The filesystem sometimes needs to handle a return value of -ENOENT
  * from the reply function, which means, that the request was
  * interrupted, and the reply discarded.  For example if
@@ -202,31 +172,22 @@ struct fuse_lowlevel_ops {
 	/**
 	 * Initialize filesystem
 	 *
-	 * This function is called when libfuse establishes
-	 * communication with the FUSE kernel module. The file system
-	 * should use this module to inspect and/or modify the
-	 * connection parameters provided in the `conn` structure.
-	 *
-	 * Note that some parameters may be overwritten by options
-	 * passed to fuse_session_new() which take precedence over the
-	 * values set in this handler.
+	 * Called before any other filesystem method
 	 *
 	 * There's no reply to this function
 	 *
-	 * @param userdata the user data passed to fuse_session_new()
+	 * @param userdata the user data passed to fuse_lowlevel_new()
 	 */
 	void (*init) (void *userdata, struct fuse_conn_info *conn);
 
 	/**
-	 * Clean up filesystem.
+	 * Clean up filesystem
 	 *
-	 * Called on filesystem exit. When this method is called, the
-	 * connection to the kernel may be gone already, so that eg. calls
-	 * to fuse_lowlevel_notify_* will fail.
+	 * Called on filesystem exit
 	 *
 	 * There's no reply to this function
 	 *
-	 * @param userdata the user data passed to fuse_session_new()
+	 * @param userdata the user data passed to fuse_lowlevel_new()
 	 */
 	void (*destroy) (void *userdata);
 
@@ -258,7 +219,7 @@ struct fuse_lowlevel_ops {
 	 * overwriting an existing file) rename. Filesystems must handle
 	 * such requests properly and it is recommended to defer removal
 	 * of the inode until the lookup count reaches zero. Calls to
-	 * unlink, rmdir or rename will be followed closely by forget
+	 * unlink, remdir or rename will be followed closely by forget
 	 * unless the file or directory is open, in which case the
 	 * kernel issues forget only after the release or releasedir
 	 * calls.
@@ -279,18 +240,10 @@ struct fuse_lowlevel_ops {
 	 * @param ino the inode number
 	 * @param nlookup the number of lookups to forget
 	 */
-	void (*forget) (fuse_req_t req, fuse_ino_t ino, uint64_t nlookup);
+	void (*forget) (fuse_req_t req, fuse_ino_t ino, unsigned long nlookup);
 
 	/**
-	 * Get file attributes.
-	 *
-	 * If writeback caching is enabled, the kernel may have a
-	 * better idea of a file's length than the FUSE file system
-	 * (eg if there has been a write that extended the file size,
-	 * but that has not yet been passed to the filesystem.n
-	 *
-	 * In this case, the st_size value provided by the file system
-	 * will be ignored.
+	 * Get file attributes
 	 *
 	 * Valid replies:
 	 *   fuse_reply_attr
@@ -310,16 +263,6 @@ struct fuse_lowlevel_ops {
 	 * bitmask contain valid values.  Other members contain undefined
 	 * values.
 	 *
-	 * Unless FUSE_CAP_HANDLE_KILLPRIV is disabled, this method is
-	 * expected to reset the setuid and setgid bits if the file
-	 * size or owner is being changed.
-	 *
-	 * This method will not be called to update st_atime or st_ctime implicitly
-	 * (eg. after a read() request), and only be called to implicitly update st_mtime
-	 * if writeback caching is active. It is the filesystem's responsibility to update
-	 * these timestamps when needed, and (if desired) to implement mount options like
-	 * `noatime` or `relatime`.
-	 *
 	 * If the setattr was invoked from the ftruncate() system call
 	 * under Linux kernel versions 2.6.15 or later, the fi->fh will
 	 * contain the value set by the open method or will be undefined
@@ -336,6 +279,9 @@ struct fuse_lowlevel_ops {
 	 * @param attr the attributes
 	 * @param to_set bit mask of attributes which should be set
 	 * @param fi file information, or NULL
+	 *
+	 * Changed in version 2.5:
+	 *     file information filled in for ftruncate
 	 */
 	void (*setattr) (fuse_req_t req, fuse_ino_t ino, struct stat *attr,
 			 int to_set, struct fuse_file_info *fi);
@@ -443,18 +389,6 @@ struct fuse_lowlevel_ops {
 	 * until the lookup count reaches zero (see description of the
 	 * forget function).
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EINVAL, i.e. all
-	 * future bmap requests will fail with EINVAL without being
-	 * send to the filesystem process.
-	 *
-	 * *flags* may be `RENAME_EXCHANGE` or `RENAME_NOREPLACE`. If
-	 * RENAME_NOREPLACE is specified, the filesystem must not
-	 * overwrite *newname* if it exists and return an error
-	 * instead. If `RENAME_EXCHANGE` is specified, the filesystem
-	 * must atomically exchange the two files, i.e. both must
-	 * exist and neither may be deleted.
-	 *
 	 * Valid replies:
 	 *   fuse_reply_err
 	 *
@@ -465,8 +399,7 @@ struct fuse_lowlevel_ops {
 	 * @param newname new name
 	 */
 	void (*rename) (fuse_req_t req, fuse_ino_t parent, const char *name,
-			fuse_ino_t newparent, const char *newname,
-			unsigned int flags);
+			fuse_ino_t newparent, const char *newname);
 
 	/**
 	 * Create a hard link
@@ -486,37 +419,12 @@ struct fuse_lowlevel_ops {
 	/**
 	 * Open a file
 	 *
-	 * Open flags are available in fi->flags. The following rules
-	 * apply.
+	 * Open flags (with the exception of O_CREAT, O_EXCL, O_NOCTTY and
+	 * O_TRUNC) are available in fi->flags.
 	 *
-	 *  - Creation (O_CREAT, O_EXCL, O_NOCTTY) flags will be
-	 *    filtered out / handled by the kernel.
-	 *
-	 *  - Access modes (O_RDONLY, O_WRONLY, O_RDWR) should be used
-	 *    by the filesystem to check if the operation is
-	 *    permitted.  If the ``-o default_permissions`` mount
-	 *    option is given, this check is already done by the
-	 *    kernel before calling open() and may thus be omitted by
-	 *    the filesystem.
-	 *
-	 *  - When writeback caching is enabled, the kernel may send
-	 *    read requests even for files opened with O_WRONLY. The
-	 *    filesystem should be prepared to handle this.
-	 *
-	 *  - When writeback caching is disabled, the filesystem is
-	 *    expected to properly handle the O_APPEND flag and ensure
-	 *    that each write is appending to the end of the file.
-	 * 
-         *  - When writeback caching is enabled, the kernel will
-	 *    handle O_APPEND. However, unless all changes to the file
-	 *    come through the kernel this will not work reliably. The
-	 *    filesystem should thus either ignore the O_APPEND flag
-	 *    (and let the kernel handle it), or return an error
-	 *    (indicating that reliably O_APPEND is not available).
-	 *
-	 * Filesystem may store an arbitrary file handle (pointer,
-	 * index, etc) in fi->fh, and use this in other all other file
-	 * operations (read, write, flush, release, fsync).
+	 * Filesystem may store an arbitrary file handle (pointer, index,
+	 * etc) in fi->fh, and use this in other all other file operations
+	 * (read, write, flush, release, fsync).
 	 *
 	 * Filesystem may also implement stateless file I/O and not store
 	 * anything in fi->fh.
@@ -524,12 +432,6 @@ struct fuse_lowlevel_ops {
 	 * There are also some flags (direct_io, keep_cache) which the
 	 * filesystem may set in fi, to change the way the file is opened.
 	 * See fuse_file_info structure in <fuse_common.h> for more details.
-	 *
-	 * If this request is answered with an error code of ENOSYS
-	 * and FUSE_CAP_NO_OPEN_SUPPORT is set in
-	 * `fuse_conn_info.capable`, this is treated as success and
-	 * future calls to open and release will also succeed without being
-	 * sent to the filesystem process.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_open
@@ -579,9 +481,6 @@ struct fuse_lowlevel_ops {
 	 * of the write system call will reflect the return value of this
 	 * operation.
 	 *
-	 * Unless FUSE_CAP_HANDLE_KILLPRIV is disabled, this method is
-	 * expected to reset the setuid and setgid bits.
-	 *
 	 * fi->fh will contain the value set by the open method, or will
 	 * be undefined if the open method didn't set any value.
 	 *
@@ -615,18 +514,11 @@ struct fuse_lowlevel_ops {
 	 *
 	 * NOTE: the name of the method is misleading, since (unlike
 	 * fsync) the filesystem is not forced to flush pending writes.
-	 * One reason to flush data is if the filesystem wants to return
-	 * write errors during close.  However, such use is non-portable
-	 * because POSIX does not require [close] to wait for delayed I/O to
-	 * complete.
+	 * One reason to flush data, is if the filesystem wants to return
+	 * write errors.
 	 *
 	 * If the filesystem supports file locking operations (setlk,
 	 * getlk) it should remove all locks belonging to 'fi->owner'.
-	 *
-	 * If this request is answered with an error code of ENOSYS,
-	 * this is treated as success and future calls to flush() will
-	 * succeed automatically without being send to the filesystem
-	 * process.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_err
@@ -634,8 +526,6 @@ struct fuse_lowlevel_ops {
 	 * @param req request handle
 	 * @param ino the inode number
 	 * @param fi file information
-	 *
-	 * [close]: http://pubs.opengroup.org/onlinepubs/9699919799/functions/close.html
 	 */
 	void (*flush) (fuse_req_t req, fuse_ino_t ino,
 		       struct fuse_file_info *fi);
@@ -647,8 +537,7 @@ struct fuse_lowlevel_ops {
 	 * file: all file descriptors are closed and all memory mappings
 	 * are unmapped.
 	 *
-	 * For every open call there will be exactly one release call (unless
-	 * the filesystem is force-unmounted).
+	 * For every open call there will be exactly one release call.
 	 *
 	 * The filesystem may reply with an error, but error values are
 	 * not returned to close() or munmap() which triggered the
@@ -674,11 +563,6 @@ struct fuse_lowlevel_ops {
 	 * If the datasync parameter is non-zero, then only the user data
 	 * should be flushed, not the meta data.
 	 *
-	 * If this request is answered with an error code of ENOSYS,
-	 * this is treated as success and future calls to fsync() will
-	 * succeed automatically without being send to the filesystem
-	 * process.
-	 *
 	 * Valid replies:
 	 *   fuse_reply_err
 	 *
@@ -697,12 +581,11 @@ struct fuse_lowlevel_ops {
 	 * etc) in fi->fh, and use this in other all other directory
 	 * stream operations (readdir, releasedir, fsyncdir).
 	 *
-	 * If this request is answered with an error code of ENOSYS and
-	 * FUSE_CAP_NO_OPENDIR_SUPPORT is set in `fuse_conn_info.capable`,
-	 * this is treated as success and future calls to opendir and
-	 * releasedir will also succeed without being sent to the filesystem
-	 * process. In addition, the kernel will cache readdir results
-	 * as if opendir returned FOPEN_KEEP_CACHE | FOPEN_CACHE_DIR.
+	 * Filesystem may also implement stateless directory I/O and not
+	 * store anything in fi->fh, though that makes it impossible to
+	 * implement standard conforming directory stream operations in
+	 * case the contents of the directory can change between opendir
+	 * and releasedir.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_open
@@ -725,28 +608,6 @@ struct fuse_lowlevel_ops {
 	 * fi->fh will contain the value set by the opendir method, or
 	 * will be undefined if the opendir method didn't set any value.
 	 *
-	 * Returning a directory entry from readdir() does not affect
-	 * its lookup count.
-	 *
-         * If off_t is non-zero, then it will correspond to one of the off_t
-	 * values that was previously returned by readdir() for the same
-	 * directory handle. In this case, readdir() should skip over entries
-	 * coming before the position defined by the off_t value. If entries
-	 * are added or removed while the directory handle is open, the filesystem
-	 * may still include the entries that have been removed, and may not
-	 * report the entries that have been created. However, addition or
-	 * removal of entries must never cause readdir() to skip over unrelated
-	 * entries or to report them more than once. This means
-	 * that off_t can not be a simple index that enumerates the entries
-	 * that have been returned but must contain sufficient information to
-	 * uniquely determine the next directory entry to return even when the
-	 * set of entries is changing.
-	 *
-	 * The function does not have to report the '.' and '..'
-	 * entries, but is allowed to do so. Note that, if readdir does
-	 * not return '.' or '..', they will not be implicitly returned,
-	 * and this behavior is observable by the caller.
-	 *
 	 * Valid replies:
 	 *   fuse_reply_buf
 	 *   fuse_reply_data
@@ -765,7 +626,7 @@ struct fuse_lowlevel_ops {
 	 * Release an open directory
 	 *
 	 * For every opendir call there will be exactly one releasedir
-	 * call (unless the filesystem is force-unmounted).
+	 * call.
 	 *
 	 * fi->fh will contain the value set by the opendir method, or
 	 * will be undefined if the opendir method didn't set any value.
@@ -788,11 +649,6 @@ struct fuse_lowlevel_ops {
 	 *
 	 * fi->fh will contain the value set by the opendir method, or
 	 * will be undefined if the opendir method didn't set any value.
-	 *
-	 * If this request is answered with an error code of ENOSYS,
-	 * this is treated as success and future calls to fsyncdir() will
-	 * succeed automatically without being send to the filesystem
-	 * process.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_err
@@ -820,11 +676,6 @@ struct fuse_lowlevel_ops {
 	/**
 	 * Set an extended attribute
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EOPNOTSUPP, i.e. all
-	 * future setxattr() requests will fail with EOPNOTSUPP without being
-	 * send to the filesystem process.
-	 *
 	 * Valid replies:
 	 *   fuse_reply_err
 	 */
@@ -842,11 +693,6 @@ struct fuse_lowlevel_ops {
 	 *
 	 * If the size is too small for the value, the ERANGE error should
 	 * be sent.
-	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EOPNOTSUPP, i.e. all
-	 * future getxattr() requests will fail with EOPNOTSUPP without being
-	 * send to the filesystem process.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_buf
@@ -875,11 +721,6 @@ struct fuse_lowlevel_ops {
 	 * If the size is too small for the list, the ERANGE error should
 	 * be sent.
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EOPNOTSUPP, i.e. all
-	 * future listxattr() requests will fail with EOPNOTSUPP without being
-	 * send to the filesystem process.
-	 *
 	 * Valid replies:
 	 *   fuse_reply_buf
 	 *   fuse_reply_data
@@ -895,11 +736,6 @@ struct fuse_lowlevel_ops {
 	/**
 	 * Remove an extended attribute
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EOPNOTSUPP, i.e. all
-	 * future removexattr() requests will fail with EOPNOTSUPP without being
-	 * send to the filesystem process.
-	 *
 	 * Valid replies:
 	 *   fuse_reply_err
 	 *
@@ -912,15 +748,13 @@ struct fuse_lowlevel_ops {
 	/**
 	 * Check file access permissions
 	 *
-	 * This will be called for the access() and chdir() system
-	 * calls.  If the 'default_permissions' mount option is given,
-	 * this method is not called.
+	 * This will be called for the access() system call.  If the
+	 * 'default_permissions' mount option is given, this method is not
+	 * called.
 	 *
 	 * This method is not called under Linux kernel versions 2.4.x
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent success, i.e. this and all future access()
-	 * requests will succeed without being send to the filesystem process.
+	 * Introduced in version 2.5
 	 *
 	 * Valid replies:
 	 *   fuse_reply_err
@@ -937,16 +771,22 @@ struct fuse_lowlevel_ops {
 	 * If the file does not exist, first create it with the specified
 	 * mode, and then open it.
 	 *
-	 * See the description of the open handler for more
-	 * information.
+	 * Open flags (with the exception of O_NOCTTY) are available in
+	 * fi->flags.
+	 *
+	 * Filesystem may store an arbitrary file handle (pointer, index,
+	 * etc) in fi->fh, and use this in other all other file operations
+	 * (read, write, flush, release, fsync).
+	 *
+	 * There are also some flags (direct_io, keep_cache) which the
+	 * filesystem may set in fi, to change the way the file is opened.
+	 * See fuse_file_info structure in <fuse_common.h> for more details.
 	 *
 	 * If this method is not implemented or under Linux kernel
 	 * versions earlier than 2.6.15, the mknod() and open() methods
 	 * will be called instead.
 	 *
-	 * If this request is answered with an error code of ENOSYS, the handler
-	 * is treated as not implemented (i.e., for this and future requests the
-	 * mknod() and open() handlers will be called instead).
+	 * Introduced in version 2.5
 	 *
 	 * Valid replies:
 	 *   fuse_reply_create
@@ -963,6 +803,8 @@ struct fuse_lowlevel_ops {
 
 	/**
 	 * Test for a POSIX file lock
+	 *
+	 * Introduced in version 2.6
 	 *
 	 * Valid replies:
 	 *   fuse_reply_lock
@@ -989,6 +831,8 @@ struct fuse_lowlevel_ops {
 	 * will still allow file locking to work locally.  Hence these are
 	 * only interesting for network filesystems and similar.
 	 *
+	 * Introduced in version 2.6
+	 *
 	 * Valid replies:
 	 *   fuse_reply_err
 	 *
@@ -1008,10 +852,7 @@ struct fuse_lowlevel_ops {
 	 * Note: This makes sense only for block device backed filesystems
 	 * mounted with the 'blkdev' option
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure, i.e. all future bmap() requests will
-	 * fail with the same error code without being send to the filesystem
-	 * process.
+	 * Introduced in version 2.6
 	 *
 	 * Valid replies:
 	 *   fuse_reply_bmap
@@ -1025,19 +866,16 @@ struct fuse_lowlevel_ops {
 	void (*bmap) (fuse_req_t req, fuse_ino_t ino, size_t blocksize,
 		      uint64_t idx);
 
-#if FUSE_USE_VERSION < 35
-	void (*ioctl) (fuse_req_t req, fuse_ino_t ino, int cmd,
-		       void *arg, struct fuse_file_info *fi, unsigned flags,
-		       const void *in_buf, size_t in_bufsz, size_t out_bufsz);
-#else
 	/**
 	 * Ioctl
 	 *
 	 * Note: For unrestricted ioctls (not allowed for FUSE
 	 * servers), data in and out areas can be discovered by giving
-	 * iovs and setting FUSE_IOCTL_RETRY in *flags*.  For
+	 * iovs and setting FUSE_IOCTL_RETRY in @flags.  For
 	 * restricted ioctls, kernel prepares in/out data area
 	 * according to the information encoded in cmd.
+	 *
+	 * Introduced in version 2.8
 	 *
 	 * Valid replies:
 	 *   fuse_reply_ioctl_retry
@@ -1054,21 +892,19 @@ struct fuse_lowlevel_ops {
 	 * @param in_buf data fetched from the caller
 	 * @param in_bufsz number of fetched bytes
 	 * @param out_bufsz maximum size of output data
-	 *
-	 * Note : the unsigned long request submitted by the application
-	 * is truncated to 32 bits.
 	 */
-	void (*ioctl) (fuse_req_t req, fuse_ino_t ino, unsigned int cmd,
-		       void *arg, struct fuse_file_info *fi, unsigned flags,
+	void (*ioctl) (fuse_req_t req, fuse_ino_t ino, int cmd, void *arg,
+		       struct fuse_file_info *fi, unsigned flags,
 		       const void *in_buf, size_t in_bufsz, size_t out_bufsz);
-#endif
 
 	/**
 	 * Poll for IO readiness
 	 *
+	 * Introduced in version 2.8
+	 *
 	 * Note: If ph is non-NULL, the client should notify
 	 * when IO readiness events occur by calling
-	 * fuse_lowlevel_notify_poll() with the specified ph.
+	 * fuse_lowelevel_notify_poll() with the specified ph.
 	 *
 	 * Regardless of the number of times poll with a non-NULL ph
 	 * is received, single notification is enough to clear all.
@@ -1077,11 +913,6 @@ struct fuse_lowlevel_ops {
 	 *
 	 * The callee is responsible for destroying ph with
 	 * fuse_pollhandle_destroy() when no longer in use.
-	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as success (with a kernel-defined default poll-mask) and
-	 * future calls to pull() will succeed the same way without being send
-	 * to the filesystem process.
 	 *
 	 * Valid replies:
 	 *   fuse_reply_poll
@@ -1103,14 +934,13 @@ struct fuse_lowlevel_ops {
 	 * kernel supports splicing from the fuse device, then the
 	 * data will be made available in pipe for supporting zero
 	 * copy data transfer.
+         *
+         * buf->count is guaranteed to be one (and thus buf->idx is
+         * always zero). The write_buf handler must ensure that
+         * bufv->off is correctly updated (reflecting the number of
+         * bytes read from bufv->buf[0]).
 	 *
-	 * buf->count is guaranteed to be one (and thus buf->idx is
-	 * always zero). The write_buf handler must ensure that
-	 * bufv->off is correctly updated (reflecting the number of
-	 * bytes read from bufv->buf[0]).
-	 *
-	 * Unless FUSE_CAP_HANDLE_KILLPRIV is disabled, this method is
-	 * expected to reset the setuid and setgid bits.
+	 * Introduced in version 2.9
 	 *
 	 * Valid replies:
 	 *   fuse_reply_write
@@ -1128,6 +958,8 @@ struct fuse_lowlevel_ops {
 
 	/**
 	 * Callback function for the retrieve request
+	 *
+	 * Introduced in version 2.9
 	 *
 	 * Valid replies:
 	 *	fuse_reply_none
@@ -1147,6 +979,8 @@ struct fuse_lowlevel_ops {
 	 * See description of the forget function for more
 	 * information.
 	 *
+	 * Introduced in version 2.9
+	 *
 	 * Valid replies:
 	 *   fuse_reply_none
 	 *
@@ -1161,6 +995,8 @@ struct fuse_lowlevel_ops {
 	 * Note: if the locking methods are not implemented, the kernel
 	 * will still allow file locking to work locally.  Hence these are
 	 * only interesting for network filesystems and similar.
+	 *
+	 * Introduced in version 2.9
 	 *
 	 * Valid replies:
 	 *   fuse_reply_err
@@ -1178,10 +1014,7 @@ struct fuse_lowlevel_ops {
 	 * subsequent writes to the specified range shall not fail due to the lack
 	 * of free space on the file system storage media.
 	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EOPNOTSUPP, i.e. all
-	 * future fallocate() requests will fail with EOPNOTSUPP without being
-	 * send to the filesystem process.
+	 * Introduced in version 2.9
 	 *
 	 * Valid replies:
 	 *   fuse_reply_err
@@ -1195,109 +1028,16 @@ struct fuse_lowlevel_ops {
 	 */
 	void (*fallocate) (fuse_req_t req, fuse_ino_t ino, int mode,
 		       off_t offset, off_t length, struct fuse_file_info *fi);
-
-	/**
-	 * Read directory with attributes
-	 *
-	 * Send a buffer filled using fuse_add_direntry_plus(), with size not
-	 * exceeding the requested size.  Send an empty buffer on end of
-	 * stream.
-	 *
-	 * fi->fh will contain the value set by the opendir method, or
-	 * will be undefined if the opendir method didn't set any value.
-	 *
-	 * In contrast to readdir() (which does not affect the lookup counts),
-	 * the lookup count of every entry returned by readdirplus(), except "."
-	 * and "..", is incremented by one.
-	 *
-	 * Valid replies:
-	 *   fuse_reply_buf
-	 *   fuse_reply_data
-	 *   fuse_reply_err
-	 *
-	 * @param req request handle
-	 * @param ino the inode number
-	 * @param size maximum number of bytes to send
-	 * @param off offset to continue reading the directory stream
-	 * @param fi file information
-	 */
-	void (*readdirplus) (fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
-			 struct fuse_file_info *fi);
-
-	/**
-	 * Copy a range of data from one file to another
-	 *
-	 * Performs an optimized copy between two file descriptors without the
-	 * additional cost of transferring data through the FUSE kernel module
-	 * to user space (glibc) and then back into the FUSE filesystem again.
-	 *
-	 * In case this method is not implemented, glibc falls back to reading
-	 * data from the source and writing to the destination. Effectively
-	 * doing an inefficient copy of the data.
-	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure with error code EOPNOTSUPP, i.e. all
-	 * future copy_file_range() requests will fail with EOPNOTSUPP without
-	 * being send to the filesystem process.
-	 *
-	 * Valid replies:
-	 *   fuse_reply_write
-	 *   fuse_reply_err
-	 *
-	 * @param req request handle
-	 * @param ino_in the inode number or the source file
-	 * @param off_in starting point from were the data should be read
-	 * @param fi_in file information of the source file
-	 * @param ino_out the inode number or the destination file
-	 * @param off_out starting point where the data should be written
-	 * @param fi_out file information of the destination file
-	 * @param len maximum size of the data to copy
-	 * @param flags passed along with the copy_file_range() syscall
-	 */
-	void (*copy_file_range) (fuse_req_t req, fuse_ino_t ino_in,
-				 off_t off_in, struct fuse_file_info *fi_in,
-				 fuse_ino_t ino_out, off_t off_out,
-				 struct fuse_file_info *fi_out, size_t len,
-				 int flags);
-
-	/**
-	 * Find next data or hole after the specified offset
-	 *
-	 * If this request is answered with an error code of ENOSYS, this is
-	 * treated as a permanent failure, i.e. all future lseek() requests will
-	 * fail with the same error code without being send to the filesystem
-	 * process.
-	 *
-	 * Valid replies:
-	 *   fuse_reply_lseek
-	 *   fuse_reply_err
-	 *
-	 * @param req request handle
-	 * @param ino the inode number
-	 * @param off offset to start search from
-	 * @param whence either SEEK_DATA or SEEK_HOLE
-	 * @param fi file information
-	 */
-	void (*lseek) (fuse_req_t req, fuse_ino_t ino, off_t off, int whence,
-		       struct fuse_file_info *fi);
 };
 
 /**
- * Reply with an error code or success.
+ * Reply with an error code or success
  *
  * Possible requests:
- *   all except forget, forget_multi, retrieve_reply
+ *   all except forget
  *
- * Wherever possible, error codes should be chosen from the list of
- * documented error conditions in the corresponding system calls
- * manpage.
- *
- * An error code of ENOSYS is sometimes treated specially. This is
- * indicated in the documentation of the affected handler functions.
- *
- * The following requests may be answered with a zero error code:
  * unlink, rmdir, rename, flush, release, fsync, fsyncdir, setxattr,
- * removexattr, setlk.
+ * removexattr and setlk may send a zero code
  *
  * @param req request handle
  * @param err the positive error value, or zero for success
@@ -1310,8 +1050,6 @@ int fuse_reply_err(fuse_req_t req, int err);
  *
  * Possible requests:
  *   forget
- *   forget_multi
- *   retrieve_reply
  *
  * @param req request handle
  */
@@ -1421,40 +1159,8 @@ int fuse_reply_buf(fuse_req_t req, const char *buf, size_t size);
 /**
  * Reply with data copied/moved from buffer(s)
  *
- * Zero copy data transfer ("splicing") will be used under
- * the following circumstances:
- *
- * 1. FUSE_CAP_SPLICE_WRITE is set in fuse_conn_info.want, and
- * 2. the kernel supports splicing from the fuse device
- *    (FUSE_CAP_SPLICE_WRITE is set in fuse_conn_info.capable), and
- * 3. *flags* does not contain FUSE_BUF_NO_SPLICE
- * 4. The amount of data that is provided in file-descriptor backed
- *    buffers (i.e., buffers for which bufv[n].flags == FUSE_BUF_FD)
- *    is at least twice the page size.
- *
- * In order for SPLICE_F_MOVE to be used, the following additional
- * conditions have to be fulfilled:
- *
- * 1. FUSE_CAP_SPLICE_MOVE is set in fuse_conn_info.want, and
- * 2. the kernel supports it (i.e, FUSE_CAP_SPLICE_MOVE is set in
-      fuse_conn_info.capable), and
- * 3. *flags* contains FUSE_BUF_SPLICE_MOVE
- *
- * Note that, if splice is used, the data is actually spliced twice:
- * once into a temporary pipe (to prepend header data), and then again
- * into the kernel. If some of the provided buffers are memory-backed,
- * the data in them is copied in step one and spliced in step two.
- *
- * The FUSE_BUF_SPLICE_FORCE_SPLICE and FUSE_BUF_SPLICE_NONBLOCK flags
- * are silently ignored.
- *
  * Possible requests:
  *   read, readdir, getxattr, listxattr
- *
- * Side effects:
- *   when used to return data from a readdirplus() (but not readdir())
- *   call, increments the lookup count of each returned entry by one
- *   on success.
  *
  * @param req request handle
  * @param bufv buffer vector
@@ -1541,12 +1247,9 @@ int fuse_reply_bmap(fuse_req_t req, uint64_t idx);
  * From the 'stbuf' argument the st_ino field and bits 12-15 of the
  * st_mode field are used.  The other fields are ignored.
  *
- * *off* should be any non-zero value that the filesystem can use to
- * identify the current point in the directory stream. It does not
- * need to be the actual physical position. A value of zero is
- * reserved to mean "from the beginning", and should therefore never
- * be used (the first call to fuse_add_direntry should be passed the
- * offset of the second directory entry).
+ * Note: offsets do not necessarily represent physical offsets, and
+ * could be any marker, that enables the implementation to find a
+ * specific point in the directory stream.
  *
  * @param req request handle
  * @param buf the point where the new entry will be added to the buffer
@@ -1559,23 +1262,6 @@ int fuse_reply_bmap(fuse_req_t req, uint64_t idx);
 size_t fuse_add_direntry(fuse_req_t req, char *buf, size_t bufsize,
 			 const char *name, const struct stat *stbuf,
 			 off_t off);
-
-/**
- * Add a directory entry to the buffer with the attributes
- *
- * See documentation of `fuse_add_direntry()` for more details.
- *
- * @param req request handle
- * @param buf the point where the new entry will be added to the buffer
- * @param bufsize remaining size of the buffer
- * @param name the name of the entry
- * @param e the directory entry
- * @param off the offset of the next entry
- * @return the space needed for the entry
- */
-size_t fuse_add_direntry_plus(fuse_req_t req, char *buf, size_t bufsize,
-			      const char *name,
-			      const struct fuse_entry_param *e, off_t off);
 
 /**
  * Reply to ask for data fetch and output buffer preparation.  ioctl
@@ -1631,18 +1317,6 @@ int fuse_reply_ioctl_iov(fuse_req_t req, int result, const struct iovec *iov,
  */
 int fuse_reply_poll(fuse_req_t req, unsigned revents);
 
-/**
- * Reply with offset
- *
- * Possible requests:
- *   lseek
- *
- * @param req request handle
- * @param off offset of next data or hole
- * @return zero for success, -errno for failure to send reply
- */
-int fuse_reply_lseek(fuse_req_t req, off_t off);
-
 /* ----------------------------------------------------------- *
  * Notification						       *
  * ----------------------------------------------------------- */
@@ -1657,118 +1331,52 @@ int fuse_reply_lseek(fuse_req_t req, off_t off);
 int fuse_lowlevel_notify_poll(struct fuse_pollhandle *ph);
 
 /**
- * Notify to invalidate cache for an inode.
+ * Notify to invalidate cache for an inode
  *
- * Added in FUSE protocol version 7.12. If the kernel does not support
- * this (or a newer) version, the function will return -ENOSYS and do
- * nothing.
- *
- * If the filesystem has writeback caching enabled, invalidating an
- * inode will first trigger a writeback of all dirty pages. The call
- * will block until all writeback requests have completed and the
- * inode has been invalidated. It will, however, not wait for
- * completion of pending writeback requests that have been issued
- * before.
- *
- * If there are no dirty pages, this function will never block.
- *
- * @param se the session object
+ * @param ch the channel through which to send the invalidation
  * @param ino the inode number
  * @param off the offset in the inode where to start invalidating
  *            or negative to invalidate attributes only
  * @param len the amount of cache to invalidate or 0 for all
  * @return zero for success, -errno for failure
  */
-int fuse_lowlevel_notify_inval_inode(struct fuse_session *se, fuse_ino_t ino,
-				     off_t off, off_t len);
+int fuse_lowlevel_notify_inval_inode(struct fuse_chan *ch, fuse_ino_t ino,
+                                     off_t off, off_t len);
 
 /**
- * Notify to invalidate parent attributes and the dentry matching parent/name
+ * Notify to invalidate parent attributes and the dentry matching
+ * parent/name
  *
- * To avoid a deadlock this function must not be called in the
- * execution path of a related filesystem operation or within any code
- * that could hold a lock that could be needed to execute such an
- * operation. As of kernel 4.18, a "related operation" is a lookup(),
- * symlink(), mknod(), mkdir(), unlink(), rename(), link() or create()
- * request for the parent, and a setattr(), unlink(), rmdir(),
- * rename(), setxattr(), removexattr(), readdir() or readdirplus()
- * request for the inode itself.
+ * To avoid a deadlock don't call this function from a filesystem operation and
+ * don't call it with a lock held that can also be held by a filesystem
+ * operation.
  *
- * When called correctly, this function will never block.
- *
- * Added in FUSE protocol version 7.12. If the kernel does not support
- * this (or a newer) version, the function will return -ENOSYS and do
- * nothing.
- *
- * @param se the session object
+ * @param ch the channel through which to send the invalidation
  * @param parent inode number
  * @param name file name
  * @param namelen strlen() of file name
  * @return zero for success, -errno for failure
  */
-int fuse_lowlevel_notify_inval_entry(struct fuse_session *se, fuse_ino_t parent,
-				     const char *name, size_t namelen);
+int fuse_lowlevel_notify_inval_entry(struct fuse_chan *ch, fuse_ino_t parent,
+                                     const char *name, size_t namelen);
 
 /**
- * Notify to expire parent attributes and the dentry matching parent/name
- * 
- * Same restrictions apply as for fuse_lowlevel_notify_inval_entry()
- * 
- * Compared to invalidating an entry, expiring the entry results not in a
- * forceful removal of that entry from kernel cache but instead the next access
- * to it forces a lookup from the filesystem.
- * 
- * This makes a difference for overmounted dentries, where plain invalidation
- * would detach all submounts before dropping the dentry from the cache. 
- * If only expiry is set on the dentry, then any overmounts are left alone and
- * until ->d_revalidate() is called.
- * 
- * Note: ->d_revalidate() is not called for the case of following a submount,
- * so invalidation will only be triggered for the non-overmounted case.
- * The dentry could also be mounted in a different mount instance, in which case
- * any submounts will still be detached.
- * 
- * Added in FUSE protocol version 7.38. If the kernel does not support
- * this (or a newer) version, the function will return -ENOSYS and do nothing.
+ * Notify to invalidate parent attributes and delete the dentry matching
+ * parent/name if the dentry's inode number matches child (otherwise it
+ * will invalidate the matching dentry).
  *
- * @param se the session object
- * @param parent inode number
- * @param name file name
- * @param namelen strlen() of file name
- * @return zero for success, -errno for failure, -enosys if no kernel support
-*/
-int fuse_lowlevel_notify_expire_entry(struct fuse_session *se, fuse_ino_t parent,
-                                      const char *name, size_t namelen);
-
-/**
- * This function behaves like fuse_lowlevel_notify_inval_entry() with
- * the following additional effect (at least as of Linux kernel 4.8):
+ * To avoid a deadlock don't call this function from a filesystem operation and
+ * don't call it with a lock held that can also be held by a filesystem
+ * operation.
  *
- * If the provided *child* inode matches the inode that is currently
- * associated with the cached dentry, and if there are any inotify
- * watches registered for the dentry, then the watchers are informed
- * that the dentry has been deleted.
- *
- * To avoid a deadlock this function must not be called while
- * executing a related filesystem operation or while holding a lock
- * that could be needed to execute such an operation (see the
- * description of fuse_lowlevel_notify_inval_entry() for more
- * details).
- *
- * When called correctly, this function will never block.
- *
- * Added in FUSE protocol version 7.18. If the kernel does not support
- * this (or a newer) version, the function will return -ENOSYS and do
- * nothing.
- *
- * @param se the session object
+ * @param ch the channel through which to send the notification
  * @param parent inode number
  * @param child inode number
  * @param name file name
  * @param namelen strlen() of file name
  * @return zero for success, -errno for failure
  */
-int fuse_lowlevel_notify_delete(struct fuse_session *se,
+int fuse_lowlevel_notify_delete(struct fuse_chan *ch,
 				fuse_ino_t parent, fuse_ino_t child,
 				const char *name, size_t namelen);
 
@@ -1786,18 +1394,14 @@ int fuse_lowlevel_notify_delete(struct fuse_session *se,
  * If this function returns an error, then the store wasn't fully
  * completed, but it may have been partially completed.
  *
- * Added in FUSE protocol version 7.15. If the kernel does not support
- * this (or a newer) version, the function will return -ENOSYS and do
- * nothing.
- *
- * @param se the session object
+ * @param ch the channel through which to send the invalidation
  * @param ino the inode number
  * @param offset the starting offset into the file to store to
  * @param bufv buffer vector
  * @param flags flags controlling the copy
  * @return zero for success, -errno for failure
  */
-int fuse_lowlevel_notify_store(struct fuse_session *se, fuse_ino_t ino,
+int fuse_lowlevel_notify_store(struct fuse_chan *ch, fuse_ino_t ino,
 			       off_t offset, struct fuse_bufvec *bufv,
 			       enum fuse_buf_copy_flags flags);
 /**
@@ -1808,8 +1412,8 @@ int fuse_lowlevel_notify_store(struct fuse_session *se, fuse_ino_t ino,
  * the returned data.
  *
  * Only present pages are returned in the retrieve reply.  Retrieving
- * stops when it finds a non-present page and only data prior to that
- * is returned.
+ * stops when it finds a non-present page and only data prior to that is
+ * returned.
  *
  * If this function returns an error, then the retrieve will not be
  * completed and no reply will be sent.
@@ -1818,18 +1422,14 @@ int fuse_lowlevel_notify_store(struct fuse_session *se, fuse_ino_t ino,
  * buffer.  For dirty pages the write() method will be called
  * regardless of having been retrieved previously.
  *
- * Added in FUSE protocol version 7.15. If the kernel does not support
- * this (or a newer) version, the function will return -ENOSYS and do
- * nothing.
- *
- * @param se the session object
+ * @param ch the channel through which to send the invalidation
  * @param ino the inode number
  * @param size the number of bytes to retrieve
  * @param offset the starting offset into the file to retrieve from
  * @param cookie user data to supply to the reply callback
  * @return zero for success, -errno for failure
  */
-int fuse_lowlevel_notify_retrieve(struct fuse_session *se, fuse_ino_t ino,
+int fuse_lowlevel_notify_retrieve(struct fuse_chan *ch, fuse_ino_t ino,
 				  size_t size, off_t offset, void *cookie);
 
 
@@ -1841,7 +1441,7 @@ int fuse_lowlevel_notify_retrieve(struct fuse_session *se, fuse_ino_t ino,
  * Get the userdata from the request
  *
  * @param req request handle
- * @return the user data passed to fuse_session_new()
+ * @return the user data passed to fuse_lowlevel_new()
  */
 void *fuse_req_userdata(fuse_req_t req);
 
@@ -1907,262 +1507,154 @@ void fuse_req_interrupt_func(fuse_req_t req, fuse_interrupt_func_t func,
  */
 int fuse_req_interrupted(fuse_req_t req);
 
+/* ----------------------------------------------------------- *
+ * Filesystem setup					       *
+ * ----------------------------------------------------------- */
+
+/* Deprecated, don't use */
+int fuse_lowlevel_is_lib_option(const char *opt);
+
+/**
+ * Create a low level session
+ *
+ * @param args argument vector
+ * @param op the low level filesystem operations
+ * @param op_size sizeof(struct fuse_lowlevel_ops)
+ * @param userdata user data
+ * @return the created session object, or NULL on failure
+ */
+struct fuse_session *fuse_lowlevel_new(struct fuse_args *args,
+				       const struct fuse_lowlevel_ops *op,
+				       size_t op_size, void *userdata);
 
 /* ----------------------------------------------------------- *
- * Inquiry functions                                           *
+ * Session interface					       *
  * ----------------------------------------------------------- */
 
 /**
- * Print low-level version information to stdout.
+ * Session operations
+ *
+ * This is used in session creation
  */
-void fuse_lowlevel_version(void);
+struct fuse_session_ops {
+	/**
+	 * Hook to process a request (mandatory)
+	 *
+	 * @param data user data passed to fuse_session_new()
+	 * @param buf buffer containing the raw request
+	 * @param len request length
+	 * @param ch channel on which the request was received
+	 */
+	void (*process) (void *data, const char *buf, size_t len,
+			 struct fuse_chan *ch);
 
-/**
- * Print available low-level options to stdout. This is not an
- * exhaustive list, but includes only those options that may be of
- * interest to an end-user of a file system.
- */
-void fuse_lowlevel_help(void);
+	/**
+	 * Hook for session exit and reset (optional)
+	 *
+	 * @param data user data passed to fuse_session_new()
+	 * @param val exited status (1 - exited, 0 - not exited)
+	 */
+	void (*exit) (void *data, int val);
 
-/**
- * Print available options for `fuse_parse_cmdline()`.
- */
-void fuse_cmdline_help(void);
+	/**
+	 * Hook for querying the current exited status (optional)
+	 *
+	 * @param data user data passed to fuse_session_new()
+	 * @return 1 if exited, 0 if not exited
+	 */
+	int (*exited) (void *data);
 
-/* ----------------------------------------------------------- *
- * Filesystem setup & teardown                                 *
- * ----------------------------------------------------------- */
-
-/**
- * Note: Any addition to this struct needs to create a compatibility symbol
- *       for fuse_parse_cmdline(). For ABI compatibility reasons it is also
- *       not possible to remove struct members.
- */
-struct fuse_cmdline_opts {
-	int singlethread;
-	int foreground;
-	int debug;
-	int nodefault_subtype;
-	char *mountpoint;
-	int show_version;
-	int show_help;
-	int clone_fd;
-	unsigned int max_idle_threads; /* discouraged, due to thread
-	                                * destruct overhead */
-
-	/* Added in libfuse-3.12 */
-	unsigned int max_threads;
+	/**
+	 * Hook for cleaning up the channel on destroy (optional)
+	 *
+	 * @param data user data passed to fuse_session_new()
+	 */
+	void (*destroy) (void *data);
 };
 
 /**
- * Utility function to parse common options for simple file systems
- * using the low-level API. A help text that describes the available
- * options can be printed with `fuse_cmdline_help`. A single
- * non-option argument is treated as the mountpoint. Multiple
- * non-option arguments will result in an error.
+ * Create a new session
  *
- * If neither -o subtype= or -o fsname= options are given, a new
- * subtype option will be added and set to the basename of the program
- * (the fsname will remain unset, and then defaults to "fuse").
- *
- * Known options will be removed from *args*, unknown options will
- * remain.
- *
- * @param args argument vector (input+output)
- * @param opts output argument for parsed options
- * @return 0 on success, -1 on failure
+ * @param op session operations
+ * @param data user data
+ * @return new session object, or NULL on failure
  */
-#if (defined(LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS))
-int fuse_parse_cmdline(struct fuse_args *args,
-		       struct fuse_cmdline_opts *opts);
-#else
-#if FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 12)
-int fuse_parse_cmdline_30(struct fuse_args *args,
-			   struct fuse_cmdline_opts *opts);
-#define fuse_parse_cmdline(args, opts) fuse_parse_cmdline_30(args, opts)
-#else
-int fuse_parse_cmdline_312(struct fuse_args *args,
-			   struct fuse_cmdline_opts *opts);
-#define fuse_parse_cmdline(args, opts) fuse_parse_cmdline_312(args, opts)
-#endif
-#endif
+struct fuse_session *fuse_session_new(struct fuse_session_ops *op, void *data);
 
 /**
- * Create a low level session.
+ * Assign a channel to a session
  *
- * Returns a session structure suitable for passing to
- * fuse_session_mount() and fuse_session_loop().
+ * Note: currently only a single channel may be assigned.  This may
+ * change in the future
  *
- * This function accepts most file-system independent mount options
- * (like context, nodev, ro - see mount(8)), as well as the general
- * fuse mount options listed in mount.fuse(8) (e.g. -o allow_root and
- * -o default_permissions, but not ``-o use_ino``).  Instead of `-o
- * debug`, debugging may also enabled with `-d` or `--debug`.
- *
- * If not all options are known, an error message is written to stderr
- * and the function returns NULL.
- *
- * Option parsing skips argv[0], which is assumed to contain the
- * program name. To prevent accidentally passing an option in
- * argv[0], this element must always be present (even if no options
- * are specified). It may be set to the empty string ('\0') if no
- * reasonable value can be provided.
- *
- * @param args argument vector
- * @param op the (low-level) filesystem operations
- * @param op_size sizeof(struct fuse_lowlevel_ops)
- * @param userdata user data
- *
- * @return the fuse session on success, NULL on failure
- **/
-struct fuse_session *fuse_session_new(struct fuse_args *args,
-				      const struct fuse_lowlevel_ops *op,
-				      size_t op_size, void *userdata);
-
-/**
- * Set a file descriptor for the session.
- *
- * This function can be used if you want to have a custom communication
- * interface instead of using a mountpoint. In practice, this means that instead
- * of calling fuse_session_mount() and fuse_session_unmount(), one could call
- * fuse_session_custom_io() where fuse_session_mount() would have otherwise been
- * called.
- *
- * In `io`, implementations for read and writev MUST be provided. Otherwise -1
- * will be returned and `fd` will not be used. Implementations for `splice_send`
- * and `splice_receive` are optional. If they are not provided splice will not
- * be used for send or receive respectively.
- *
- * The provided file descriptor `fd` will be closed when fuse_session_destroy()
- * is called.
- *
- * @param se session object
- * @param io Custom io to use when retrieving/sending requests/responses
- * @param fd file descriptor for the session
- *
- * @return 0  on success
- * @return -EINVAL if `io`, `io->read` or `ìo->writev` are NULL
- * @return -EBADF  if `fd` was smaller than 0
- * @return -errno  if failed to allocate memory to store `io`
- *
- **/
-int fuse_session_custom_io(struct fuse_session *se,
-				   const struct fuse_custom_io *io, int fd);
-
-/**
- * Mount a FUSE file system.
- *
- * @param mountpoint the mount point path
- * @param se session object
- *
- * @return 0 on success, -1 on failure.
- **/
-int fuse_session_mount(struct fuse_session *se, const char *mountpoint);
-
-/**
- * Enter a single threaded, blocking event loop.
- *
- * When the event loop terminates because the connection to the FUSE
- * kernel module has been closed, this function returns zero. This
- * happens when the filesystem is unmounted regularly (by the
- * filesystem owner or root running the umount(8) or fusermount(1)
- * command), or if connection is explicitly severed by writing ``1``
- * to the``abort`` file in ``/sys/fs/fuse/connections/NNN``. The only
- * way to distinguish between these two conditions is to check if the
- * filesystem is still mounted after the session loop returns.
- *
- * When some error occurs during request processing, the function
- * returns a negated errno(3) value.
- *
- * If the loop has been terminated because of a signal handler
- * installed by fuse_set_signal_handlers(), this function returns the
- * (positive) signal value that triggered the exit.
+ * If a session is destroyed, the assigned channel is also destroyed
  *
  * @param se the session
- * @return 0, -errno, or a signal value
+ * @param ch the channel
  */
-int fuse_session_loop(struct fuse_session *se);
-
-#if FUSE_USE_VERSION < 32
-	int fuse_session_loop_mt_31(struct fuse_session *se, int clone_fd);
-	#define fuse_session_loop_mt(se, clone_fd) fuse_session_loop_mt_31(se, clone_fd)
-#elif FUSE_USE_VERSION < FUSE_MAKE_VERSION(3, 12)
-	int fuse_session_loop_mt_32(struct fuse_session *se, struct fuse_loop_config *config);
-	#define fuse_session_loop_mt(se, config) fuse_session_loop_mt_32(se, config)
-#else
-	#if (defined(LIBFUSE_BUILT_WITH_VERSIONED_SYMBOLS))
-		/**
-		 * Enter a multi-threaded event loop.
-		 *
-		 * For a description of the return value and the conditions when the
-		 * event loop exits, refer to the documentation of
-		 * fuse_session_loop().
-		 *
-		 * @param se the session
-		 * @param config session loop configuration
-		 * @return see fuse_session_loop()
-		 */
-		int fuse_session_loop_mt(struct fuse_session *se, struct fuse_loop_config *config);
-	#else
-		int fuse_session_loop_mt_312(struct fuse_session *se, struct fuse_loop_config *config);
-		#define fuse_session_loop_mt(se, config) fuse_session_loop_mt_312(se, config)
-	#endif
-#endif
+void fuse_session_add_chan(struct fuse_session *se, struct fuse_chan *ch);
 
 /**
- * Flag a session as terminated.
+ * Remove a channel from a session
  *
- * This will cause any running event loops to terminate on the next opportunity. If this function is
- * called by a thread that is not a FUSE worker thread, the next
- * opportunity will be when FUSE a request is received (which may be far in the future if the
- * filesystem is not currently being used by any clients). One way to avoid this delay is to
- * afterwards sent a signal to the main thread (if fuse_set_signal_handlers() is used, SIGPIPE
- * will cause the main thread to wake-up but otherwise be ignored).
+ * If the channel is not assigned to a session, then this is a no-op
  *
- * @param se the session
+ * @param ch the channel to remove
  */
-void fuse_session_exit(struct fuse_session *se);
+void fuse_session_remove_chan(struct fuse_chan *ch);
 
 /**
- * Reset the terminated flag of a session
+ * Iterate over the channels assigned to a session
+ *
+ * The iterating function needs to start with a NULL channel, and
+ * after that needs to pass the previously returned channel to the
+ * function.
  *
  * @param se the session
+ * @param ch the previous channel, or NULL
+ * @return the next channel, or NULL if no more channels exist
  */
-void fuse_session_reset(struct fuse_session *se);
+struct fuse_chan *fuse_session_next_chan(struct fuse_session *se,
+					 struct fuse_chan *ch);
 
 /**
- * Query the terminated flag of a session
+ * Process a raw request
  *
  * @param se the session
- * @return 1 if exited, 0 if not exited
+ * @param buf buffer containing the raw request
+ * @param len request length
+ * @param ch channel on which the request was received
  */
-int fuse_session_exited(struct fuse_session *se);
+void fuse_session_process(struct fuse_session *se, const char *buf, size_t len,
+			  struct fuse_chan *ch);
 
 /**
- * Ensure that file system is unmounted.
+ * Process a raw request supplied in a generic buffer
  *
- * In regular operation, the file system is typically unmounted by the
- * user calling umount(8) or fusermount(1), which then terminates the
- * FUSE session loop. However, the session loop may also terminate as
- * a result of an explicit call to fuse_session_exit() (e.g. by a
- * signal handler installed by fuse_set_signal_handler()). In this
- * case the filesystem remains mounted, but any attempt to access it
- * will block (while the filesystem process is still running) or give
- * an ESHUTDOWN error (after the filesystem process has terminated).
- *
- * If the communication channel with the FUSE kernel module is still
- * open (i.e., if the session loop was terminated by an explicit call
- * to fuse_session_exit()), this function will close it and unmount
- * the filesystem. If the communication channel has been closed by the
- * kernel, this method will do (almost) nothing.
- *
- * NOTE: The above semantics mean that if the connection to the kernel
- * is terminated via the ``/sys/fs/fuse/connections/NNN/abort`` file,
- * this method will *not* unmount the filesystem.
+ * This is a more generic version of fuse_session_process().  The
+ * fuse_buf may contain a memory buffer or a pipe file descriptor.
  *
  * @param se the session
+ * @param buf the fuse_buf containing the request
+ * @param ch channel on which the request was received
  */
-void fuse_session_unmount(struct fuse_session *se);
+void fuse_session_process_buf(struct fuse_session *se,
+			      const struct fuse_buf *buf, struct fuse_chan *ch);
+
+/**
+ * Receive a raw request supplied in a generic buffer
+ *
+ * This is a more generic version of fuse_chan_recv().  The fuse_buf
+ * supplied to this function contains a suitably allocated memory
+ * buffer.  This may be overwritten with a file descriptor buffer.
+ *
+ * @param se the session
+ * @param buf the fuse_buf to store the request in
+ * @param chp pointer to the channel
+ * @return the actual size of the raw request, or -errno on error
+ */
+int fuse_session_receive_buf(struct fuse_session *se, struct fuse_buf *buf,
+			     struct fuse_chan **chp);
 
 /**
  * Destroy a session
@@ -2171,52 +1663,195 @@ void fuse_session_unmount(struct fuse_session *se);
  */
 void fuse_session_destroy(struct fuse_session *se);
 
+/**
+ * Exit a session
+ *
+ * @param se the session
+ */
+void fuse_session_exit(struct fuse_session *se);
+
+/**
+ * Reset the exited status of a session
+ *
+ * @param se the session
+ */
+void fuse_session_reset(struct fuse_session *se);
+
+/**
+ * Query the exited status of a session
+ *
+ * @param se the session
+ * @return 1 if exited, 0 if not exited
+ */
+int fuse_session_exited(struct fuse_session *se);
+
+/**
+ * Get the user data provided to the session
+ *
+ * @param se the session
+ * @return the user data
+ */
+void *fuse_session_data(struct fuse_session *se);
+
+/**
+ * Enter a single threaded event loop
+ *
+ * @param se the session
+ * @return 0 on success, -1 on error
+ */
+int fuse_session_loop(struct fuse_session *se);
+
+/**
+ * Enter a multi-threaded event loop
+ *
+ * @param se the session
+ * @return 0 on success, -1 on error
+ */
+int fuse_session_loop_mt(struct fuse_session *se);
+
 /* ----------------------------------------------------------- *
- * Custom event loop support                                   *
+ * Channel interface					       *
  * ----------------------------------------------------------- */
 
 /**
- * Return file descriptor for communication with kernel.
+ * Channel operations
  *
- * The file selector can be used to integrate FUSE with a custom event
- * loop. Whenever data is available for reading on the provided fd,
- * the event loop should call `fuse_session_receive_buf` followed by
- * `fuse_session_process_buf` to process the request.
- *
- * The returned file descriptor is valid until `fuse_session_unmount`
- * is called.
- *
- * @param se the session
- * @return a file descriptor
+ * This is used in channel creation
  */
-int fuse_session_fd(struct fuse_session *se);
+struct fuse_chan_ops {
+	/**
+	 * Hook for receiving a raw request
+	 *
+	 * @param ch pointer to the channel
+	 * @param buf the buffer to store the request in
+	 * @param size the size of the buffer
+	 * @return the actual size of the raw request, or -1 on error
+	 */
+	int (*receive)(struct fuse_chan **chp, char *buf, size_t size);
+
+	/**
+	 * Hook for sending a raw reply
+	 *
+	 * A return value of -ENOENT means, that the request was
+	 * interrupted, and the reply was discarded
+	 *
+	 * @param ch the channel
+	 * @param iov vector of blocks
+	 * @param count the number of blocks in vector
+	 * @return zero on success, -errno on failure
+	 */
+	int (*send)(struct fuse_chan *ch, const struct iovec iov[],
+		    size_t count);
+
+	/**
+	 * Destroy the channel
+	 *
+	 * @param ch the channel
+	 */
+	void (*destroy)(struct fuse_chan *ch);
+};
 
 /**
- * Process a raw request supplied in a generic buffer
+ * Create a new channel
  *
- * The fuse_buf may contain a memory buffer or a pipe file descriptor.
- *
- * @param se the session
- * @param buf the fuse_buf containing the request
+ * @param op channel operations
+ * @param fd file descriptor of the channel
+ * @param bufsize the minimal receive buffer size
+ * @param data user data
+ * @return the new channel object, or NULL on failure
  */
-void fuse_session_process_buf(struct fuse_session *se,
-			      const struct fuse_buf *buf);
+struct fuse_chan *fuse_chan_new(struct fuse_chan_ops *op, int fd,
+				size_t bufsize, void *data);
 
 /**
- * Read a raw request from the kernel into the supplied buffer.
+ * Query the file descriptor of the channel
  *
- * Depending on file system options, system capabilities, and request
- * size the request is either read into a memory buffer or spliced
- * into a temporary pipe.
+ * @param ch the channel
+ * @return the file descriptor passed to fuse_chan_new()
+ */
+int fuse_chan_fd(struct fuse_chan *ch);
+
+/**
+ * Query the minimal receive buffer size
  *
- * @param se the session
- * @param buf the fuse_buf to store the request in
+ * @param ch the channel
+ * @return the buffer size passed to fuse_chan_new()
+ */
+size_t fuse_chan_bufsize(struct fuse_chan *ch);
+
+/**
+ * Query the user data
+ *
+ * @param ch the channel
+ * @return the user data passed to fuse_chan_new()
+ */
+void *fuse_chan_data(struct fuse_chan *ch);
+
+/**
+ * Query the session to which this channel is assigned
+ *
+ * @param ch the channel
+ * @return the session, or NULL if the channel is not assigned
+ */
+struct fuse_session *fuse_chan_session(struct fuse_chan *ch);
+
+/**
+ * Receive a raw request
+ *
+ * A return value of -ENODEV means, that the filesystem was unmounted
+ *
+ * @param ch pointer to the channel
+ * @param buf the buffer to store the request in
+ * @param size the size of the buffer
  * @return the actual size of the raw request, or -errno on error
  */
-int fuse_session_receive_buf(struct fuse_session *se, struct fuse_buf *buf);
+int fuse_chan_recv(struct fuse_chan **ch, char *buf, size_t size);
+
+/**
+ * Send a raw reply
+ *
+ * A return value of -ENOENT means, that the request was
+ * interrupted, and the reply was discarded
+ *
+ * @param ch the channel
+ * @param iov vector of blocks
+ * @param count the number of blocks in vector
+ * @return zero on success, -errno on failure
+ */
+int fuse_chan_send(struct fuse_chan *ch, const struct iovec iov[],
+		   size_t count);
+
+/**
+ * Destroy a channel
+ *
+ * @param ch the channel
+ */
+void fuse_chan_destroy(struct fuse_chan *ch);
+
+/* ----------------------------------------------------------- *
+ * Compatibility stuff					       *
+ * ----------------------------------------------------------- */
+
+#if FUSE_USE_VERSION < 26
+#  include "fuse_lowlevel_compat.h"
+#  define fuse_chan_ops fuse_chan_ops_compat24
+#  define fuse_chan_new fuse_chan_new_compat24
+#  if FUSE_USE_VERSION == 25
+#    define fuse_lowlevel_ops fuse_lowlevel_ops_compat25
+#    define fuse_lowlevel_new fuse_lowlevel_new_compat25
+#  elif FUSE_USE_VERSION == 24
+#    define fuse_lowlevel_ops fuse_lowlevel_ops_compat
+#    define fuse_lowlevel_new fuse_lowlevel_new_compat
+#    define fuse_file_info fuse_file_info_compat
+#    define fuse_reply_statfs fuse_reply_statfs_compat
+#    define fuse_reply_open fuse_reply_open_compat
+#  else
+#    error Compatibility with low-level API version < 24 not supported
+#  endif
+#endif
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* FUSE_LOWLEVEL_H_ */
+#endif /* _FUSE_LOWLEVEL_H_ */

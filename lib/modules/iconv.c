@@ -6,7 +6,7 @@
   See the file COPYING.LIB
 */
 
-#include <fuse_config.h>
+#define FUSE_USE_VERSION 26
 
 #include <fuse.h>
 #include <stdio.h>
@@ -77,13 +77,12 @@ static int iconv_convpath(struct iconv *ic, const char *path, char **newpathp,
 
 			inc = (pathlen + 1) * 4;
 			newpathlen += inc;
-			int dp = p - newpath;
 			tmp = realloc(newpath, newpathlen + 1);
 			err = -ENOMEM;
 			if (!tmp)
 				goto err;
 
-			p = tmp + dp;
+			p = tmp + (p - newpath);
 			plen += inc;
 			newpath = tmp;
 		}
@@ -100,14 +99,26 @@ err:
 	return err;
 }
 
-static int iconv_getattr(const char *path, struct stat *stbuf,
-			 struct fuse_file_info *fi)
+static int iconv_getattr(const char *path, struct stat *stbuf)
 {
 	struct iconv *ic = iconv_get();
 	char *newpath;
 	int err = iconv_convpath(ic, path, &newpath, 0);
 	if (!err) {
-		err = fuse_fs_getattr(ic->next, newpath, stbuf, fi);
+		err = fuse_fs_getattr(ic->next, newpath, stbuf);
+		free(newpath);
+	}
+	return err;
+}
+
+static int iconv_fgetattr(const char *path, struct stat *stbuf,
+			  struct fuse_file_info *fi)
+{
+	struct iconv *ic = iconv_get();
+	char *newpath;
+	int err = iconv_convpath(ic, path, &newpath, 0);
+	if (!err) {
+		err = fuse_fs_fgetattr(ic->next, newpath, stbuf, fi);
 		free(newpath);
 	}
 	return err;
@@ -159,22 +170,20 @@ static int iconv_opendir(const char *path, struct fuse_file_info *fi)
 }
 
 static int iconv_dir_fill(void *buf, const char *name,
-			  const struct stat *stbuf, off_t off,
-			  enum fuse_fill_dir_flags flags)
+			  const struct stat *stbuf, off_t off)
 {
 	struct iconv_dh *dh = buf;
 	char *newname;
 	int res = 0;
 	if (iconv_convpath(dh->ic, name, &newname, 1) == 0) {
-		res = dh->prev_filler(dh->prev_buf, newname, stbuf, off, flags);
+		res = dh->prev_filler(dh->prev_buf, newname, stbuf, off);
 		free(newname);
 	}
 	return res;
 }
 
 static int iconv_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
-			 off_t offset, struct fuse_file_info *fi,
-			 enum fuse_readdir_flags flags)
+			 off_t offset, struct fuse_file_info *fi)
 {
 	struct iconv *ic = iconv_get();
 	char *newpath;
@@ -185,7 +194,7 @@ static int iconv_readdir(const char *path, void *buf, fuse_fill_dir_t filler,
 		dh.prev_buf = buf;
 		dh.prev_filler = filler;
 		err = fuse_fs_readdir(ic->next, newpath, &dh, iconv_dir_fill,
-				      offset, fi, flags);
+				      offset, fi);
 		free(newpath);
 	}
 	return err;
@@ -268,7 +277,7 @@ static int iconv_symlink(const char *from, const char *to)
 	return err;
 }
 
-static int iconv_rename(const char *from, const char *to, unsigned int flags)
+static int iconv_rename(const char *from, const char *to)
 {
 	struct iconv *ic = iconv_get();
 	char *newfrom;
@@ -277,7 +286,7 @@ static int iconv_rename(const char *from, const char *to, unsigned int flags)
 	if (!err) {
 		err = iconv_convpath(ic, to, &newto, 0);
 		if (!err) {
-			err = fuse_fs_rename(ic->next, newfrom, newto, flags);
+			err = fuse_fs_rename(ic->next, newfrom, newto);
 			free(newto);
 		}
 		free(newfrom);
@@ -302,53 +311,62 @@ static int iconv_link(const char *from, const char *to)
 	return err;
 }
 
-static int iconv_chmod(const char *path, mode_t mode,
-		       struct fuse_file_info *fi)
+static int iconv_chmod(const char *path, mode_t mode)
 {
 	struct iconv *ic = iconv_get();
 	char *newpath;
 	int err = iconv_convpath(ic, path, &newpath, 0);
 	if (!err) {
-		err = fuse_fs_chmod(ic->next, newpath, mode, fi);
+		err = fuse_fs_chmod(ic->next, newpath, mode);
 		free(newpath);
 	}
 	return err;
 }
 
-static int iconv_chown(const char *path, uid_t uid, gid_t gid,
-		       struct fuse_file_info *fi)
+static int iconv_chown(const char *path, uid_t uid, gid_t gid)
 {
 	struct iconv *ic = iconv_get();
 	char *newpath;
 	int err = iconv_convpath(ic, path, &newpath, 0);
 	if (!err) {
-		err = fuse_fs_chown(ic->next, newpath, uid, gid, fi);
+		err = fuse_fs_chown(ic->next, newpath, uid, gid);
 		free(newpath);
 	}
 	return err;
 }
 
-static int iconv_truncate(const char *path, off_t size,
+static int iconv_truncate(const char *path, off_t size)
+{
+	struct iconv *ic = iconv_get();
+	char *newpath;
+	int err = iconv_convpath(ic, path, &newpath, 0);
+	if (!err) {
+		err = fuse_fs_truncate(ic->next, newpath, size);
+		free(newpath);
+	}
+	return err;
+}
+
+static int iconv_ftruncate(const char *path, off_t size,
 			   struct fuse_file_info *fi)
 {
 	struct iconv *ic = iconv_get();
 	char *newpath;
 	int err = iconv_convpath(ic, path, &newpath, 0);
 	if (!err) {
-		err = fuse_fs_truncate(ic->next, newpath, size, fi);
+		err = fuse_fs_ftruncate(ic->next, newpath, size, fi);
 		free(newpath);
 	}
 	return err;
 }
 
-static int iconv_utimens(const char *path, const struct timespec ts[2],
-			 struct fuse_file_info *fi)
+static int iconv_utimens(const char *path, const struct timespec ts[2])
 {
 	struct iconv *ic = iconv_get();
 	char *newpath;
 	int err = iconv_convpath(ic, path, &newpath, 0);
 	if (!err) {
-		err = fuse_fs_utimens(ic->next, newpath, ts, fi);
+		err = fuse_fs_utimens(ic->next, newpath, ts);
 		free(newpath);
 	}
 	return err;
@@ -555,26 +573,10 @@ static int iconv_bmap(const char *path, size_t blocksize, uint64_t *idx)
 	return err;
 }
 
-static off_t iconv_lseek(const char *path, off_t off, int whence,
-			 struct fuse_file_info *fi)
+static void *iconv_init(struct fuse_conn_info *conn)
 {
 	struct iconv *ic = iconv_get();
-	char *newpath;
-	int res = iconv_convpath(ic, path, &newpath, 0);
-	if (!res) {
-		res = fuse_fs_lseek(ic->next, newpath, off, whence, fi);
-		free(newpath);
-	}
-	return res;
-}
-
-static void *iconv_init(struct fuse_conn_info *conn,
-			struct fuse_config *cfg)
-{
-	struct iconv *ic = iconv_get();
-	fuse_fs_init(ic->next, conn, cfg);
-	/* Don't touch cfg->nullpath_ok, we can work with
-	   either */
+	fuse_fs_init(ic->next, conn);
 	return ic;
 }
 
@@ -594,6 +596,7 @@ static const struct fuse_operations iconv_oper = {
 	.destroy	= iconv_destroy,
 	.init		= iconv_init,
 	.getattr	= iconv_getattr,
+	.fgetattr	= iconv_fgetattr,
 	.access		= iconv_access,
 	.readlink	= iconv_readlink,
 	.opendir	= iconv_opendir,
@@ -609,6 +612,7 @@ static const struct fuse_operations iconv_oper = {
 	.chmod		= iconv_chmod,
 	.chown		= iconv_chown,
 	.truncate	= iconv_truncate,
+	.ftruncate	= iconv_ftruncate,
 	.utimens	= iconv_utimens,
 	.create		= iconv_create,
 	.open		= iconv_open_file,
@@ -626,7 +630,9 @@ static const struct fuse_operations iconv_oper = {
 	.lock		= iconv_lock,
 	.flock		= iconv_flock,
 	.bmap		= iconv_bmap,
-	.lseek		= iconv_lseek,
+
+	.flag_nullpath_ok = 1,
+	.flag_nopath = 1,
 };
 
 static const struct fuse_opt iconv_opts[] = {
@@ -639,18 +645,13 @@ static const struct fuse_opt iconv_opts[] = {
 
 static void iconv_help(void)
 {
-	char *charmap;
-	const char *old = setlocale(LC_CTYPE, "");
-
-	charmap = strdup(nl_langinfo(CODESET));
-	if (old)
-		setlocale(LC_CTYPE, old);
-	else
-		perror("setlocale");
-
-	printf(
+	char *old = strdup(setlocale(LC_CTYPE, ""));
+	char *charmap = strdup(nl_langinfo(CODESET));
+	setlocale(LC_CTYPE, old);
+	free(old);
+	fprintf(stderr,
 "    -o from_code=CHARSET   original encoding of file names (default: UTF-8)\n"
-"    -o to_code=CHARSET     new encoding of the file names (default: %s)\n",
+"    -o to_code=CHARSET	    new encoding of the file names (default: %s)\n",
 		charmap);
 	free(charmap);
 }
@@ -673,13 +674,13 @@ static struct fuse_fs *iconv_new(struct fuse_args *args,
 {
 	struct fuse_fs *fs;
 	struct iconv *ic;
-	const char *old = NULL;
+	char *old = NULL;
 	const char *from;
 	const char *to;
 
 	ic = calloc(1, sizeof(struct iconv));
 	if (ic == NULL) {
-		fuse_log(FUSE_LOG_ERR, "fuse-iconv: memory allocation failed\n");
+		fprintf(stderr, "fuse-iconv: memory allocation failed\n");
 		return NULL;
 	}
 
@@ -687,7 +688,7 @@ static struct fuse_fs *iconv_new(struct fuse_args *args,
 		goto out_free;
 
 	if (!next[0] || next[1]) {
-		fuse_log(FUSE_LOG_ERR, "fuse-iconv: exactly one next filesystem required\n");
+		fprintf(stderr, "fuse-iconv: exactly one next filesystem required\n");
 		goto out_free;
 	}
 
@@ -695,22 +696,22 @@ static struct fuse_fs *iconv_new(struct fuse_args *args,
 	to = ic->to_code ? ic->to_code : "";
 	/* FIXME: detect charset equivalence? */
 	if (!to[0])
-		old = setlocale(LC_CTYPE, "");
+		old = strdup(setlocale(LC_CTYPE, ""));
 	ic->tofs = iconv_open(from, to);
 	if (ic->tofs == (iconv_t) -1) {
-		fuse_log(FUSE_LOG_ERR, "fuse-iconv: cannot convert from %s to %s\n",
+		fprintf(stderr, "fuse-iconv: cannot convert from %s to %s\n",
 			to, from);
 		goto out_free;
 	}
 	ic->fromfs = iconv_open(to, from);
 	if (ic->tofs == (iconv_t) -1) {
-		fuse_log(FUSE_LOG_ERR, "fuse-iconv: cannot convert from %s to %s\n",
+		fprintf(stderr, "fuse-iconv: cannot convert from %s to %s\n",
 			from, to);
 		goto out_iconv_close_to;
 	}
 	if (old) {
 		setlocale(LC_CTYPE, old);
-		old = NULL;
+		free(old);
 	}
 
 	ic->next = next[0];
@@ -730,6 +731,7 @@ out_free:
 	free(ic);
 	if (old) {
 		setlocale(LC_CTYPE, old);
+		free(old);
 	}
 	return NULL;
 }

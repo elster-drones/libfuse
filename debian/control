@@ -4,7 +4,6 @@ Priority: optional
 Maintainer: Laszlo Boszormenyi (GCS) <gcs@debian.org>
 Build-Depends:
  debhelper-compat (= 13),
- meson,
  libselinux-dev [linux-any],
  gettext
 Standards-Version: 4.6.1

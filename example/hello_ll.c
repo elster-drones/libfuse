@@ -2,23 +2,13 @@
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
 
-  This program can be distributed under the terms of the GNU GPLv2.
+  This program can be distributed under the terms of the GNU GPL.
   See the file COPYING.
+
+  gcc -Wall hello_ll.c `pkg-config fuse --cflags --libs` -o hello_ll
 */
 
-/** @file
- *
- * minimal example filesystem using low-level API
- *
- * Compile with:
- *
- *     gcc -Wall hello_ll.c `pkg-config fuse3 --cflags --libs` -o hello_ll
- *
- * ## Source code ##
- * \include hello_ll.c
- */
-
-#define FUSE_USE_VERSION 34
+#define FUSE_USE_VERSION 26
 
 #include <fuse_lowlevel.h>
 #include <stdio.h>
@@ -138,7 +128,7 @@ static void hello_ll_open(fuse_req_t req, fuse_ino_t ino,
 {
 	if (ino != 2)
 		fuse_reply_err(req, EISDIR);
-	else if ((fi->flags & O_ACCMODE) != O_RDONLY)
+	else if ((fi->flags & 3) != O_RDONLY)
 		fuse_reply_err(req, EACCES);
 	else
 		fuse_reply_open(req, fi);
@@ -153,125 +143,39 @@ static void hello_ll_read(fuse_req_t req, fuse_ino_t ino, size_t size,
 	reply_buf_limited(req, hello_str, strlen(hello_str), off, size);
 }
 
-static void hello_ll_getxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
-							  size_t size)
-{
-	(void)size;
-	assert(ino == 2);
-	if (strcmp(name, "hello_ll_getxattr_name") == 0)
-	{
-		const char *buf = "hello_ll_getxattr_value";
-		fuse_reply_buf(req, buf, strlen(buf));
-	}
-	else
-	{
-		fuse_reply_err(req, ENOTSUP);
-	}
-}
-
-static void hello_ll_setxattr(fuse_req_t req, fuse_ino_t ino, const char *name,
-							  const char *value, size_t size, int flags)
-{
-	(void)flags;
-	(void)size;
-	assert(ino == 2);
-	const char* exp_val = "hello_ll_setxattr_value";
-	if (strcmp(name, "hello_ll_setxattr_name") == 0 &&
-	    strlen(exp_val) == size &&
-	    strncmp(value, exp_val, size) == 0)
-	{
-		fuse_reply_err(req, 0);
-	}
-	else
-	{
-		fuse_reply_err(req, ENOTSUP);
-	}
-}
-
-static void hello_ll_removexattr(fuse_req_t req, fuse_ino_t ino, const char *name)
-{
-	assert(ino == 2);
-	if (strcmp(name, "hello_ll_removexattr_name") == 0)
-	{
-		fuse_reply_err(req, 0);
-	}
-	else
-	{
-		fuse_reply_err(req, ENOTSUP);
-	}
-}
-
-static const struct fuse_lowlevel_ops hello_ll_oper = {
-	.lookup = hello_ll_lookup,
-	.getattr = hello_ll_getattr,
-	.readdir = hello_ll_readdir,
-	.open = hello_ll_open,
-	.read = hello_ll_read,
-	.setxattr = hello_ll_setxattr,
-	.getxattr = hello_ll_getxattr,
-	.removexattr = hello_ll_removexattr,
+static struct fuse_lowlevel_ops hello_ll_oper = {
+	.lookup		= hello_ll_lookup,
+	.getattr	= hello_ll_getattr,
+	.readdir	= hello_ll_readdir,
+	.open		= hello_ll_open,
+	.read		= hello_ll_read,
 };
 
 int main(int argc, char *argv[])
 {
 	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct fuse_session *se;
-	struct fuse_cmdline_opts opts;
-	struct fuse_loop_config config;
-	int ret = -1;
+	struct fuse_chan *ch;
+	char *mountpoint;
+	int err = -1;
 
-	if (fuse_parse_cmdline(&args, &opts) != 0)
-		return 1;
-	if (opts.show_help) {
-		printf("usage: %s [options] <mountpoint>\n\n", argv[0]);
-		fuse_cmdline_help();
-		fuse_lowlevel_help();
-		ret = 0;
-		goto err_out1;
-	} else if (opts.show_version) {
-		printf("FUSE library version %s\n", fuse_pkgversion());
-		fuse_lowlevel_version();
-		ret = 0;
-		goto err_out1;
+	if (fuse_parse_cmdline(&args, &mountpoint, NULL, NULL) != -1 &&
+	    (ch = fuse_mount(mountpoint, &args)) != NULL) {
+		struct fuse_session *se;
+
+		se = fuse_lowlevel_new(&args, &hello_ll_oper,
+				       sizeof(hello_ll_oper), NULL);
+		if (se != NULL) {
+			if (fuse_set_signal_handlers(se) != -1) {
+				fuse_session_add_chan(se, ch);
+				err = fuse_session_loop(se);
+				fuse_remove_signal_handlers(se);
+				fuse_session_remove_chan(ch);
+			}
+			fuse_session_destroy(se);
+		}
+		fuse_unmount(mountpoint, ch);
 	}
-
-	if(opts.mountpoint == NULL) {
-		printf("usage: %s [options] <mountpoint>\n", argv[0]);
-		printf("       %s --help\n", argv[0]);
-		ret = 1;
-		goto err_out1;
-	}
-
-	se = fuse_session_new(&args, &hello_ll_oper,
-			      sizeof(hello_ll_oper), NULL);
-	if (se == NULL)
-	    goto err_out1;
-
-	if (fuse_set_signal_handlers(se) != 0)
-	    goto err_out2;
-
-	if (fuse_session_mount(se, opts.mountpoint) != 0)
-	    goto err_out3;
-
-	fuse_daemonize(opts.foreground);
-
-	/* Block until ctrl+c or fusermount -u */
-	if (opts.singlethread)
-		ret = fuse_session_loop(se);
-	else {
-		config.clone_fd = opts.clone_fd;
-		config.max_idle_threads = opts.max_idle_threads;
-		ret = fuse_session_loop_mt(se, &config);
-	}
-
-	fuse_session_unmount(se);
-err_out3:
-	fuse_remove_signal_handlers(se);
-err_out2:
-	fuse_session_destroy(se);
-err_out1:
-	free(opts.mountpoint);
 	fuse_opt_free_args(&args);
 
-	return ret ? 1 : 0;
+	return err ? 1 : 0;
 }

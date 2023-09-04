@@ -6,8 +6,8 @@
   See the file COPYING.LIB.
 */
 
-#ifndef FUSE_OPT_H_
-#define FUSE_OPT_H_
+#ifndef _FUSE_OPT_H_
+#define _FUSE_OPT_H_
 
 /** @file
  *
@@ -70,9 +70,8 @@ extern "C" {
  *
  * 6) "-x %s", etc.  Combination of 4) and 5)
  *
- * If the format is "%s", memory is allocated for the string unlike with
- * scanf().  The previous value (if non-NULL) stored at the this location is
- * freed.
+ * If the format is "%s", memory is allocated for the string unlike
+ * with scanf().
  */
 struct fuse_opt {
 	/** Matching template and optional parameter formatting */
@@ -268,4 +267,4 @@ int fuse_opt_match(const struct fuse_opt opts[], const char *opt);
 }
 #endif
 
-#endif /* FUSE_OPT_H_ */
+#endif /* _FUSE_OPT_H_ */

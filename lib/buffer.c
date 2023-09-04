@@ -2,16 +2,13 @@
   FUSE: Filesystem in Userspace
   Copyright (C) 2010  Miklos Szeredi <miklos@szeredi.hu>
 
-  Functions for dealing with `struct fuse_buf` and `struct
-  fuse_bufvec`.
-
   This program can be distributed under the terms of the GNU LGPLv2.
   See the file COPYING.LIB
 */
 
 #define _GNU_SOURCE
 
-#include "fuse_config.h"
+#include "config.h"
 #include "fuse_i.h"
 #include "fuse_lowlevel.h"
 #include <string.h>
@@ -48,10 +45,10 @@ static ssize_t fuse_buf_write(const struct fuse_buf *dst, size_t dst_off,
 
 	while (len) {
 		if (dst->flags & FUSE_BUF_FD_SEEK) {
-			res = pwrite(dst->fd, (char *)src->mem + src_off, len,
+			res = pwrite(dst->fd, src->mem + src_off, len,
 				     dst->pos + dst_off);
 		} else {
-			res = write(dst->fd, (char *)src->mem + src_off, len);
+			res = write(dst->fd, src->mem + src_off, len);
 		}
 		if (res == -1) {
 			if (!copied)
@@ -82,10 +79,10 @@ static ssize_t fuse_buf_read(const struct fuse_buf *dst, size_t dst_off,
 
 	while (len) {
 		if (src->flags & FUSE_BUF_FD_SEEK) {
-			res = pread(src->fd, (char *)dst->mem + dst_off, len,
+			res = pread(src->fd, dst->mem + dst_off, len,
 				     src->pos + src_off);
 		} else {
-			res = read(src->fd, (char *)dst->mem + dst_off, len);
+			res = read(src->fd, dst->mem + dst_off, len);
 		}
 		if (res == -1) {
 			if (!copied)
@@ -232,8 +229,8 @@ static ssize_t fuse_buf_copy_one(const struct fuse_buf *dst, size_t dst_off,
 	int dst_is_fd = dst->flags & FUSE_BUF_IS_FD;
 
 	if (!src_is_fd && !dst_is_fd) {
-		char *dstmem = (char *)dst->mem + dst_off;
-		char *srcmem = (char *)src->mem + src_off;
+		void *dstmem = dst->mem + dst_off;
+		void *srcmem = src->mem + src_off;
 
 		if (dstmem != srcmem) {
 			if (dstmem + len <= srcmem || srcmem + len <= dstmem)
@@ -265,9 +262,6 @@ static const struct fuse_buf *fuse_bufvec_current(struct fuse_bufvec *bufv)
 static int fuse_bufvec_advance(struct fuse_bufvec *bufv, size_t len)
 {
 	const struct fuse_buf *buf = fuse_bufvec_current(bufv);
-
-	if (!buf)
-		return 0;
 
 	bufv->off += len;
 	assert(bufv->off <= buf->size);

@@ -2,20 +2,16 @@
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
 
-  Helper functions to create (simple) standalone programs. With the
-  aid of these functions it should be possible to create full FUSE
-  file system by implementing nothing but the request handlers.
-
   This program can be distributed under the terms of the GNU LGPLv2.
   See the file COPYING.LIB.
 */
 
-#include "fuse_config.h"
+#include "config.h"
 #include "fuse_i.h"
 #include "fuse_misc.h"
 #include "fuse_opt.h"
 #include "fuse_lowlevel.h"
-#include "mount_util.h"
+#include "fuse_common_compat.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -26,161 +22,111 @@
 #include <errno.h>
 #include <sys/param.h>
 
-#define FUSE_HELPER_OPT(t, p) \
-	{ t, offsetof(struct fuse_cmdline_opts, p), 1 }
+enum  {
+	KEY_HELP,
+	KEY_HELP_NOHEADER,
+	KEY_VERSION,
+};
+
+struct helper_opts {
+	int singlethread;
+	int foreground;
+	int nodefault_subtype;
+	char *mountpoint;
+};
+
+#define FUSE_HELPER_OPT(t, p) { t, offsetof(struct helper_opts, p), 1 }
 
 static const struct fuse_opt fuse_helper_opts[] = {
-	FUSE_HELPER_OPT("-h",		show_help),
-	FUSE_HELPER_OPT("--help",	show_help),
-	FUSE_HELPER_OPT("-V",		show_version),
-	FUSE_HELPER_OPT("--version",	show_version),
-	FUSE_HELPER_OPT("-d",		debug),
-	FUSE_HELPER_OPT("debug",	debug),
 	FUSE_HELPER_OPT("-d",		foreground),
 	FUSE_HELPER_OPT("debug",	foreground),
-	FUSE_OPT_KEY("-d",		FUSE_OPT_KEY_KEEP),
-	FUSE_OPT_KEY("debug",		FUSE_OPT_KEY_KEEP),
 	FUSE_HELPER_OPT("-f",		foreground),
 	FUSE_HELPER_OPT("-s",		singlethread),
 	FUSE_HELPER_OPT("fsname=",	nodefault_subtype),
-	FUSE_OPT_KEY("fsname=",		FUSE_OPT_KEY_KEEP),
-#ifndef __FreeBSD__
 	FUSE_HELPER_OPT("subtype=",	nodefault_subtype),
+
+	FUSE_OPT_KEY("-h",		KEY_HELP),
+	FUSE_OPT_KEY("--help",		KEY_HELP),
+	FUSE_OPT_KEY("-ho",		KEY_HELP_NOHEADER),
+	FUSE_OPT_KEY("-V",		KEY_VERSION),
+	FUSE_OPT_KEY("--version",	KEY_VERSION),
+	FUSE_OPT_KEY("-d",		FUSE_OPT_KEY_KEEP),
+	FUSE_OPT_KEY("debug",		FUSE_OPT_KEY_KEEP),
+	FUSE_OPT_KEY("fsname=",		FUSE_OPT_KEY_KEEP),
 	FUSE_OPT_KEY("subtype=",	FUSE_OPT_KEY_KEEP),
-#endif
-	FUSE_HELPER_OPT("clone_fd",	clone_fd),
-	FUSE_HELPER_OPT("max_idle_threads=%u", max_idle_threads),
-	FUSE_HELPER_OPT("max_threads=%u", max_threads),
 	FUSE_OPT_END
 };
 
-struct fuse_conn_info_opts {
-	int atomic_o_trunc;
-	int no_remote_posix_lock;
-	int no_remote_flock;
-	int splice_write;
-	int splice_move;
-	int splice_read;
-	int no_splice_write;
-	int no_splice_move;
-	int no_splice_read;
-	int auto_inval_data;
-	int no_auto_inval_data;
-	int no_readdirplus;
-	int no_readdirplus_auto;
-	int async_dio;
-	int no_async_dio;
-	int writeback_cache;
-	int no_writeback_cache;
-	int async_read;
-	int sync_read;
-	unsigned max_write;
-	unsigned max_readahead;
-	unsigned max_background;
-	unsigned congestion_threshold;
-	unsigned time_gran;
-	int set_max_write;
-	int set_max_readahead;
-	int set_max_background;
-	int set_congestion_threshold;
-	int set_time_gran;
-};
-
-#define CONN_OPTION(t, p, v)					\
-	{ t, offsetof(struct fuse_conn_info_opts, p), v }
-static const struct fuse_opt conn_info_opt_spec[] = {
-	CONN_OPTION("max_write=%u", max_write, 0),
-	CONN_OPTION("max_write=", set_max_write, 1),
-	CONN_OPTION("max_readahead=%u", max_readahead, 0),
-	CONN_OPTION("max_readahead=", set_max_readahead, 1),
-	CONN_OPTION("max_background=%u", max_background, 0),
-	CONN_OPTION("max_background=", set_max_background, 1),
-	CONN_OPTION("congestion_threshold=%u", congestion_threshold, 0),
-	CONN_OPTION("congestion_threshold=", set_congestion_threshold, 1),
-	CONN_OPTION("sync_read", sync_read, 1),
-	CONN_OPTION("async_read", async_read, 1),
-	CONN_OPTION("atomic_o_trunc", atomic_o_trunc, 1),
-	CONN_OPTION("no_remote_lock", no_remote_posix_lock, 1),
-	CONN_OPTION("no_remote_lock", no_remote_flock, 1),
-	CONN_OPTION("no_remote_flock", no_remote_flock, 1),
-	CONN_OPTION("no_remote_posix_lock", no_remote_posix_lock, 1),
-	CONN_OPTION("splice_write", splice_write, 1),
-	CONN_OPTION("no_splice_write", no_splice_write, 1),
-	CONN_OPTION("splice_move", splice_move, 1),
-	CONN_OPTION("no_splice_move", no_splice_move, 1),
-	CONN_OPTION("splice_read", splice_read, 1),
-	CONN_OPTION("no_splice_read", no_splice_read, 1),
-	CONN_OPTION("auto_inval_data", auto_inval_data, 1),
-	CONN_OPTION("no_auto_inval_data", no_auto_inval_data, 1),
-	CONN_OPTION("readdirplus=no", no_readdirplus, 1),
-	CONN_OPTION("readdirplus=yes", no_readdirplus, 0),
-	CONN_OPTION("readdirplus=yes", no_readdirplus_auto, 1),
-	CONN_OPTION("readdirplus=auto", no_readdirplus, 0),
-	CONN_OPTION("readdirplus=auto", no_readdirplus_auto, 0),
-	CONN_OPTION("async_dio", async_dio, 1),
-	CONN_OPTION("no_async_dio", no_async_dio, 1),
-	CONN_OPTION("writeback_cache", writeback_cache, 1),
-	CONN_OPTION("no_writeback_cache", no_writeback_cache, 1),
-	CONN_OPTION("time_gran=%u", time_gran, 0),
-	CONN_OPTION("time_gran=", set_time_gran, 1),
-	FUSE_OPT_END
-};
-
-
-void fuse_cmdline_help(void)
+static void usage(const char *progname)
 {
-	printf("    -h   --help            print help\n"
-	       "    -V   --version         print version\n"
-	       "    -d   -o debug          enable debug output (implies -f)\n"
-	       "    -f                     foreground operation\n"
-	       "    -s                     disable multi-threaded operation\n"
-	       "    -o clone_fd            use separate fuse device fd for each thread\n"
-	       "                           (may improve performance)\n"
-	       "    -o max_idle_threads    the maximum number of idle worker threads\n"
-	       "                           allowed (default: -1)\n"
-	       "    -o max_threads         the maximum number of worker threads\n"
-	       "                           allowed (default: 10)\n");
+	fprintf(stderr,
+		"usage: %s mountpoint [options]\n\n", progname);
+	fprintf(stderr,
+		"general options:\n"
+		"    -o opt,[opt...]        mount options\n"
+		"    -h   --help            print help\n"
+		"    -V   --version         print version\n"
+		"\n");
+}
+
+static void helper_help(void)
+{
+	fprintf(stderr,
+		"FUSE options:\n"
+		"    -d   -o debug          enable debug output (implies -f)\n"
+		"    -f                     foreground operation\n"
+		"    -s                     disable multi-threaded operation\n"
+		"\n"
+		);
+}
+
+static void helper_version(void)
+{
+	fprintf(stderr, "FUSE library version: %s\n", PACKAGE_VERSION);
 }
 
 static int fuse_helper_opt_proc(void *data, const char *arg, int key,
 				struct fuse_args *outargs)
 {
-	(void) outargs;
-	struct fuse_cmdline_opts *opts = data;
+	struct helper_opts *hopts = data;
 
 	switch (key) {
-	case FUSE_OPT_KEY_NONOPT:
-		if (!opts->mountpoint) {
-			if (fuse_mnt_parse_fuse_fd(arg) != -1) {
-				return fuse_opt_add_opt(&opts->mountpoint, arg);
-			}
+	case KEY_HELP:
+		usage(outargs->argv[0]);
+		/* fall through */
 
-			char mountpoint[PATH_MAX] = "";
+	case KEY_HELP_NOHEADER:
+		helper_help();
+		return fuse_opt_add_arg(outargs, "-h");
+
+	case KEY_VERSION:
+		helper_version();
+		return 1;
+
+	case FUSE_OPT_KEY_NONOPT:
+		if (!hopts->mountpoint) {
+			char mountpoint[PATH_MAX];
 			if (realpath(arg, mountpoint) == NULL) {
-				fuse_log(FUSE_LOG_ERR,
+				fprintf(stderr,
 					"fuse: bad mount point `%s': %s\n",
 					arg, strerror(errno));
 				return -1;
 			}
-			return fuse_opt_add_opt(&opts->mountpoint, mountpoint);
+			return fuse_opt_add_opt(&hopts->mountpoint, mountpoint);
 		} else {
-			fuse_log(FUSE_LOG_ERR, "fuse: invalid argument `%s'\n", arg);
+			fprintf(stderr, "fuse: invalid argument `%s'\n", arg);
 			return -1;
 		}
 
 	default:
-		/* Pass through unknown options */
 		return 1;
 	}
 }
 
-/* Under FreeBSD, there is no subtype option so this
-   function actually sets the fsname */
 static int add_default_subtype(const char *progname, struct fuse_args *args)
 {
 	int res;
 	char *subtype_opt;
-
 	const char *basename = strrchr(progname, '/');
 	if (basename == NULL)
 		basename = progname;
@@ -189,65 +135,46 @@ static int add_default_subtype(const char *progname, struct fuse_args *args)
 
 	subtype_opt = (char *) malloc(strlen(basename) + 64);
 	if (subtype_opt == NULL) {
-		fuse_log(FUSE_LOG_ERR, "fuse: memory allocation failed\n");
+		fprintf(stderr, "fuse: memory allocation failed\n");
 		return -1;
 	}
-#ifdef __FreeBSD__
-	sprintf(subtype_opt, "-ofsname=%s", basename);
-#else
 	sprintf(subtype_opt, "-osubtype=%s", basename);
-#endif
 	res = fuse_opt_add_arg(args, subtype_opt);
 	free(subtype_opt);
 	return res;
 }
 
-int fuse_parse_cmdline_312(struct fuse_args *args,
-			   struct fuse_cmdline_opts *opts);
-FUSE_SYMVER("fuse_parse_cmdline_312", "fuse_parse_cmdline@@FUSE_3.12")
-int fuse_parse_cmdline_312(struct fuse_args *args,
-			   struct fuse_cmdline_opts *opts)
+int fuse_parse_cmdline(struct fuse_args *args, char **mountpoint,
+		       int *multithreaded, int *foreground)
 {
-	memset(opts, 0, sizeof(struct fuse_cmdline_opts));
+	int res;
+	struct helper_opts hopts;
 
-	opts->max_idle_threads = UINT_MAX; /* new default in fuse version 3.12 */
-	opts->max_threads = 10;
-
-	if (fuse_opt_parse(args, opts, fuse_helper_opts,
-			   fuse_helper_opt_proc) == -1)
+	memset(&hopts, 0, sizeof(hopts));
+	res = fuse_opt_parse(args, &hopts, fuse_helper_opts,
+			     fuse_helper_opt_proc);
+	if (res == -1)
 		return -1;
 
-	/* *Linux*: if neither -o subtype nor -o fsname are specified,
-	   set subtype to program's basename.
-	   *FreeBSD*: if fsname is not specified, set to program's
-	   basename. */
-	if (!opts->nodefault_subtype)
-		if (add_default_subtype(args->argv[0], args) == -1)
-			return -1;
-
-	return 0;
-}
-
-/**
- * struct fuse_cmdline_opts got extended in libfuse-3.12
- */
-int fuse_parse_cmdline_30(struct fuse_args *args,
-		       struct fuse_cmdline_opts *opts);
-FUSE_SYMVER("fuse_parse_cmdline_30", "fuse_parse_cmdline@FUSE_3.0")
-int fuse_parse_cmdline_30(struct fuse_args *args,
-			  struct fuse_cmdline_opts *out_opts)
-{
-	struct fuse_cmdline_opts opts;
-
-	int rc = fuse_parse_cmdline_312(args, &opts);
-	if (rc == 0) {
-		/* copy up to the size of the old pre 3.12 struct */
-		memcpy(out_opts, &opts,
-		       offsetof(struct fuse_cmdline_opts, max_idle_threads) +
-		       sizeof(opts.max_idle_threads));
+	if (!hopts.nodefault_subtype) {
+		res = add_default_subtype(args->argv[0], args);
+		if (res == -1)
+			goto err;
 	}
+	if (mountpoint)
+		*mountpoint = hopts.mountpoint;
+	else
+		free(hopts.mountpoint);
 
-	return rc;
+	if (multithreaded)
+		*multithreaded = !hopts.singlethread;
+	if (foreground)
+		*foreground = hopts.foreground;
+	return 0;
+
+err:
+	free(hopts.mountpoint);
+	return -1;
 }
 
 int fuse_daemonize(int foreground)
@@ -273,7 +200,7 @@ int fuse_daemonize(int foreground)
 		case 0:
 			break;
 		default:
-			(void) read(waiter[0], &completed, sizeof(completed));
+			read(waiter[0], &completed, sizeof(completed));
 			_exit(0);
 		}
 
@@ -293,185 +220,275 @@ int fuse_daemonize(int foreground)
 				close(nullfd);
 		}
 
-		/* Propagate completion of daemon initialization */
+		/* Propagate completion of daemon initializatation */
 		completed = 1;
-		(void) write(waiter[1], &completed, sizeof(completed));
+		write(waiter[1], &completed, sizeof(completed));
 		close(waiter[0]);
 		close(waiter[1]);
-	} else {
-		(void) chdir("/");
 	}
+	return 0;
+}
+
+static struct fuse_chan *fuse_mount_common(const char *mountpoint,
+					   struct fuse_args *args)
+{
+	struct fuse_chan *ch;
+	int fd;
+
+	/*
+	 * Make sure file descriptors 0, 1 and 2 are open, otherwise chaos
+	 * would ensue.
+	 */
+	do {
+		fd = open("/dev/null", O_RDWR);
+		if (fd > 2)
+			close(fd);
+	} while (fd >= 0 && fd <= 2);
+
+	fd = fuse_mount_compat25(mountpoint, args);
+	if (fd == -1)
+		return NULL;
+
+	ch = fuse_kern_chan_new(fd);
+	if (!ch)
+		fuse_kern_unmount(mountpoint, fd);
+
+	return ch;
+}
+
+struct fuse_chan *fuse_mount(const char *mountpoint, struct fuse_args *args)
+{
+	return fuse_mount_common(mountpoint, args);
+}
+
+static void fuse_unmount_common(const char *mountpoint, struct fuse_chan *ch)
+{
+	if (mountpoint) {
+		int fd = ch ? fuse_chan_clearfd(ch) : -1;
+		fuse_kern_unmount(mountpoint, fd);
+		if (ch)
+			fuse_chan_destroy(ch);
+	}
+}
+
+void fuse_unmount(const char *mountpoint, struct fuse_chan *ch)
+{
+	fuse_unmount_common(mountpoint, ch);
+}
+
+struct fuse *fuse_setup_common(int argc, char *argv[],
+			       const struct fuse_operations *op,
+			       size_t op_size,
+			       char **mountpoint,
+			       int *multithreaded,
+			       int *fd,
+			       void *user_data,
+			       int compat)
+{
+	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
+	struct fuse_chan *ch;
+	struct fuse *fuse;
+	int foreground;
+	int res;
+
+	res = fuse_parse_cmdline(&args, mountpoint, multithreaded, &foreground);
+	if (res == -1)
+		return NULL;
+
+	ch = fuse_mount_common(*mountpoint, &args);
+	if (!ch) {
+		fuse_opt_free_args(&args);
+		goto err_free;
+	}
+
+	fuse = fuse_new_common(ch, &args, op, op_size, user_data, compat);
+	fuse_opt_free_args(&args);
+	if (fuse == NULL)
+		goto err_unmount;
+
+	res = fuse_daemonize(foreground);
+	if (res == -1)
+		goto err_unmount;
+
+	res = fuse_set_signal_handlers(fuse_get_session(fuse));
+	if (res == -1)
+		goto err_unmount;
+
+	if (fd)
+		*fd = fuse_chan_fd(ch);
+
+	return fuse;
+
+err_unmount:
+	fuse_unmount_common(*mountpoint, ch);
+	if (fuse)
+		fuse_destroy(fuse);
+err_free:
+	free(*mountpoint);
+	return NULL;
+}
+
+struct fuse *fuse_setup(int argc, char *argv[],
+			const struct fuse_operations *op, size_t op_size,
+			char **mountpoint, int *multithreaded, void *user_data)
+{
+	return fuse_setup_common(argc, argv, op, op_size, mountpoint,
+				 multithreaded, NULL, user_data, 0);
+}
+
+static void fuse_teardown_common(struct fuse *fuse, char *mountpoint)
+{
+	struct fuse_session *se = fuse_get_session(fuse);
+	struct fuse_chan *ch = fuse_session_next_chan(se, NULL);
+	fuse_remove_signal_handlers(se);
+	fuse_unmount_common(mountpoint, ch);
+	fuse_destroy(fuse);
+	free(mountpoint);
+}
+
+void fuse_teardown(struct fuse *fuse, char *mountpoint)
+{
+	fuse_teardown_common(fuse, mountpoint);
+}
+
+static int fuse_main_common(int argc, char *argv[],
+			    const struct fuse_operations *op, size_t op_size,
+			    void *user_data, int compat)
+{
+	struct fuse *fuse;
+	char *mountpoint;
+	int multithreaded;
+	int res;
+
+	fuse = fuse_setup_common(argc, argv, op, op_size, &mountpoint,
+				 &multithreaded, NULL, user_data, compat);
+	if (fuse == NULL)
+		return 1;
+
+	if (multithreaded)
+		res = fuse_loop_mt(fuse);
+	else
+		res = fuse_loop(fuse);
+
+	fuse_teardown_common(fuse, mountpoint);
+	if (res == -1)
+		return 1;
+
 	return 0;
 }
 
 int fuse_main_real(int argc, char *argv[], const struct fuse_operations *op,
 		   size_t op_size, void *user_data)
 {
-	struct fuse_args args = FUSE_ARGS_INIT(argc, argv);
-	struct fuse *fuse;
-	struct fuse_cmdline_opts opts;
-	int res;
-	struct fuse_loop_config *loop_config = NULL;
-
-	if (fuse_parse_cmdline(&args, &opts) != 0)
-		return 1;
-
-	if (opts.show_version) {
-		printf("FUSE library version %s\n", PACKAGE_VERSION);
-		fuse_lowlevel_version();
-		res = 0;
-		goto out1;
-	}
-
-	if (opts.show_help) {
-		if(args.argv[0][0] != '\0')
-			printf("usage: %s [options] <mountpoint>\n\n",
-			       args.argv[0]);
-		printf("FUSE options:\n");
-		fuse_cmdline_help();
-		fuse_lib_help(&args);
-		res = 0;
-		goto out1;
-	}
-
-	if (!opts.show_help &&
-	    !opts.mountpoint) {
-		fuse_log(FUSE_LOG_ERR, "error: no mountpoint specified\n");
-		res = 2;
-		goto out1;
-	}
-
-
-	fuse = fuse_new_31(&args, op, op_size, user_data);
-	if (fuse == NULL) {
-		res = 3;
-		goto out1;
-	}
-
-	if (fuse_mount(fuse,opts.mountpoint) != 0) {
-		res = 4;
-		goto out2;
-	}
-
-	if (fuse_daemonize(opts.foreground) != 0) {
-		res = 5;
-		goto out3;
-	}
-
-	struct fuse_session *se = fuse_get_session(fuse);
-	if (fuse_set_signal_handlers(se) != 0) {
-		res = 6;
-		goto out3;
-	}
-
-	if (opts.singlethread)
-		res = fuse_loop(fuse);
-	else {
-		loop_config = fuse_loop_cfg_create();
-		if (loop_config == NULL) {
-			res = 7;
-			goto out3;
-		}
-
-		fuse_loop_cfg_set_clone_fd(loop_config, opts.clone_fd);
-
-		fuse_loop_cfg_set_idle_threads(loop_config, opts.max_idle_threads);
-		fuse_loop_cfg_set_max_threads(loop_config, opts.max_threads);
-		res = fuse_loop_mt(fuse, loop_config);
-	}
-	if (res)
-		res = 8;
-
-	fuse_remove_signal_handlers(se);
-out3:
-	fuse_unmount(fuse);
-out2:
-	fuse_destroy(fuse);
-out1:
-	fuse_loop_cfg_destroy(loop_config);
-	free(opts.mountpoint);
-	fuse_opt_free_args(&args);
-	return res;
+	return fuse_main_common(argc, argv, op, op_size, user_data, 0);
 }
 
-
-void fuse_apply_conn_info_opts(struct fuse_conn_info_opts *opts,
-			       struct fuse_conn_info *conn)
+#undef fuse_main
+int fuse_main(void);
+int fuse_main(void)
 {
-	if(opts->set_max_write)
-		conn->max_write = opts->max_write;
-	if(opts->set_max_background)
-		conn->max_background = opts->max_background;
-	if(opts->set_congestion_threshold)
-		conn->congestion_threshold = opts->congestion_threshold;
-	if(opts->set_time_gran)
-		conn->time_gran = opts->time_gran;
-	if(opts->set_max_readahead)
-		conn->max_readahead = opts->max_readahead;
-
-#define LL_ENABLE(cond,cap) \
-	if (cond) conn->want |= (cap)
-#define LL_DISABLE(cond,cap) \
-	if (cond) conn->want &= ~(cap)
-
-	LL_ENABLE(opts->splice_read, FUSE_CAP_SPLICE_READ);
-	LL_DISABLE(opts->no_splice_read, FUSE_CAP_SPLICE_READ);
-
-	LL_ENABLE(opts->splice_write, FUSE_CAP_SPLICE_WRITE);
-	LL_DISABLE(opts->no_splice_write, FUSE_CAP_SPLICE_WRITE);
-
-	LL_ENABLE(opts->splice_move, FUSE_CAP_SPLICE_MOVE);
-	LL_DISABLE(opts->no_splice_move, FUSE_CAP_SPLICE_MOVE);
-
-	LL_ENABLE(opts->auto_inval_data, FUSE_CAP_AUTO_INVAL_DATA);
-	LL_DISABLE(opts->no_auto_inval_data, FUSE_CAP_AUTO_INVAL_DATA);
-
-	LL_DISABLE(opts->no_readdirplus, FUSE_CAP_READDIRPLUS);
-	LL_DISABLE(opts->no_readdirplus_auto, FUSE_CAP_READDIRPLUS_AUTO);
-
-	LL_ENABLE(opts->async_dio, FUSE_CAP_ASYNC_DIO);
-	LL_DISABLE(opts->no_async_dio, FUSE_CAP_ASYNC_DIO);
-
-	LL_ENABLE(opts->writeback_cache, FUSE_CAP_WRITEBACK_CACHE);
-	LL_DISABLE(opts->no_writeback_cache, FUSE_CAP_WRITEBACK_CACHE);
-
-	LL_ENABLE(opts->async_read, FUSE_CAP_ASYNC_READ);
-	LL_DISABLE(opts->sync_read, FUSE_CAP_ASYNC_READ);
-
-	LL_DISABLE(opts->no_remote_posix_lock, FUSE_CAP_POSIX_LOCKS);
-	LL_DISABLE(opts->no_remote_flock, FUSE_CAP_FLOCK_LOCKS);
+	fprintf(stderr, "fuse_main(): This function does not exist\n");
+	return -1;
 }
 
-struct fuse_conn_info_opts* fuse_parse_conn_info_opts(struct fuse_args *args)
+int fuse_version(void)
 {
-	struct fuse_conn_info_opts *opts;
-
-	opts = calloc(1, sizeof(struct fuse_conn_info_opts));
-	if(opts == NULL) {
-		fuse_log(FUSE_LOG_ERR, "calloc failed\n");
-		return NULL;
-	}
-	if(fuse_opt_parse(args, opts, conn_info_opt_spec, NULL) == -1) {
-		free(opts);
-		return NULL;
-	}
-	return opts;
+	return FUSE_VERSION;
 }
 
-int fuse_open_channel(const char *mountpoint, const char* options)
+#include "fuse_compat.h"
+
+#if !defined(__FreeBSD__) && !defined(__NetBSD__)
+
+struct fuse *fuse_setup_compat22(int argc, char *argv[],
+				 const struct fuse_operations_compat22 *op,
+				 size_t op_size, char **mountpoint,
+				 int *multithreaded, int *fd)
 {
-	struct mount_opts *opts = NULL;
-	int fd = -1;
-	const char *argv[] = { "", "-o", options };
-	int argc = sizeof(argv) / sizeof(argv[0]);
-	struct fuse_args args = FUSE_ARGS_INIT(argc, (char**) argv);
-
-	opts = parse_mount_opts(&args);
-	if (opts == NULL)
-		return -1;
-
-	fd = fuse_kern_mount(mountpoint, opts);
-	destroy_mount_opts(opts);
-
-	return fd;
+	return fuse_setup_common(argc, argv, (struct fuse_operations *) op,
+				 op_size, mountpoint, multithreaded, fd, NULL,
+				 22);
 }
+
+struct fuse *fuse_setup_compat2(int argc, char *argv[],
+				const struct fuse_operations_compat2 *op,
+				char **mountpoint, int *multithreaded,
+				int *fd)
+{
+	return fuse_setup_common(argc, argv, (struct fuse_operations *) op,
+				 sizeof(struct fuse_operations_compat2),
+				 mountpoint, multithreaded, fd, NULL, 21);
+}
+
+int fuse_main_real_compat22(int argc, char *argv[],
+			    const struct fuse_operations_compat22 *op,
+			    size_t op_size)
+{
+	return fuse_main_common(argc, argv, (struct fuse_operations *) op,
+				op_size, NULL, 22);
+}
+
+void fuse_main_compat1(int argc, char *argv[],
+		       const struct fuse_operations_compat1 *op)
+{
+	fuse_main_common(argc, argv, (struct fuse_operations *) op,
+			 sizeof(struct fuse_operations_compat1), NULL, 11);
+}
+
+int fuse_main_compat2(int argc, char *argv[],
+		      const struct fuse_operations_compat2 *op)
+{
+	return fuse_main_common(argc, argv, (struct fuse_operations *) op,
+				sizeof(struct fuse_operations_compat2), NULL,
+				21);
+}
+
+int fuse_mount_compat1(const char *mountpoint, const char *args[])
+{
+	/* just ignore mount args for now */
+	(void) args;
+	return fuse_mount_compat22(mountpoint, NULL);
+}
+
+FUSE_SYMVER(".symver fuse_setup_compat2,__fuse_setup@");
+FUSE_SYMVER(".symver fuse_setup_compat22,fuse_setup@FUSE_2.2");
+FUSE_SYMVER(".symver fuse_teardown,__fuse_teardown@");
+FUSE_SYMVER(".symver fuse_main_compat2,fuse_main@");
+FUSE_SYMVER(".symver fuse_main_real_compat22,fuse_main_real@FUSE_2.2");
+
+#endif /* __FreeBSD__ || __NetBSD__ */
+
+
+struct fuse *fuse_setup_compat25(int argc, char *argv[],
+				 const struct fuse_operations_compat25 *op,
+				 size_t op_size, char **mountpoint,
+				 int *multithreaded, int *fd)
+{
+	return fuse_setup_common(argc, argv, (struct fuse_operations *) op,
+				 op_size, mountpoint, multithreaded, fd, NULL,
+				 25);
+}
+
+int fuse_main_real_compat25(int argc, char *argv[],
+			    const struct fuse_operations_compat25 *op,
+			    size_t op_size)
+{
+	return fuse_main_common(argc, argv, (struct fuse_operations *) op,
+				op_size, NULL, 25);
+}
+
+void fuse_teardown_compat22(struct fuse *fuse, int fd, char *mountpoint)
+{
+	(void) fd;
+	fuse_teardown_common(fuse, mountpoint);
+}
+
+int fuse_mount_compat25(const char *mountpoint, struct fuse_args *args)
+{
+	return fuse_kern_mount(mountpoint, args);
+}
+
+FUSE_SYMVER(".symver fuse_setup_compat25,fuse_setup@FUSE_2.5");
+FUSE_SYMVER(".symver fuse_teardown_compat22,fuse_teardown@FUSE_2.2");
+FUSE_SYMVER(".symver fuse_main_real_compat25,fuse_main_real@FUSE_2.5");
+FUSE_SYMVER(".symver fuse_mount_compat25,fuse_mount@FUSE_2.5");

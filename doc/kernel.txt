@@ -39,7 +39,7 @@ What is FUSE?
 
 FUSE is a userspace filesystem framework.  It consists of a kernel
 module (fuse.ko), a userspace library (libfuse.*) and a mount utility
-(fusermount3).
+(fusermount).
 
 One of the most important features of FUSE is allowing secure,
 non-privileged mounts.  This opens up new possibilities for the use of
@@ -49,7 +49,7 @@ using the sftp protocol.
 The userspace library and utilities are available from the FUSE
 homepage:
 
-  https://github.com/libfuse/libfuse/
+  http://fuse.sourceforge.net/
 
 Filesystem type
 ~~~~~~~~~~~~~~~
@@ -70,7 +70,50 @@ The filesystem type given to mount(2) can be one of the following:
 Mount options
 ~~~~~~~~~~~~~
 
-See mount.fuse3(8).
+'fd=N'
+
+  The file descriptor to use for communication between the userspace
+  filesystem and the kernel.  The file descriptor must have been
+  obtained by opening the FUSE device ('/dev/fuse').
+
+'rootmode=M'
+
+  The file mode of the filesystem's root in octal representation.
+
+'user_id=N'
+
+  The numeric user id of the mount owner.
+
+'group_id=N'
+
+  The numeric group id of the mount owner.
+
+'default_permissions'
+
+  By default FUSE doesn't check file access permissions, the
+  filesystem is free to implement it's access policy or leave it to
+  the underlying file access mechanism (e.g. in case of network
+  filesystems).  This option enables permission checking, restricting
+  access based on file mode.  It is usually useful together with the
+  'allow_other' mount option.
+
+'allow_other'
+
+  This option overrides the security measure restricting file access
+  to the user mounting the filesystem.  This option is by default only
+  allowed to root, but this restriction can be removed with a
+  (userspace) configuration option.
+
+'max_read=N'
+
+  With this option the maximum size of read operations can be set.
+  The default is infinite.  Note that the size of read requests is
+  limited anyway to 32 pages (which is 128kbyte on i386).
+
+'blksize=N'
+
+  Set the block size for the filesystem.  The default is 512.  This
+  option is only valid for 'fuseblk' type mounts.
 
 Control filesystem
 ~~~~~~~~~~~~~~~~~~
@@ -80,7 +123,7 @@ There's a control filesystem for FUSE, which can be mounted by:
   mount -t fusectl none /sys/fs/fuse/connections
 
 Mounting it under the '/sys/fs/fuse/connections' directory makes it
-backwards compatible with versions before 2.6.0.
+backwards compatible with earlier versions.
 
 Under the fuse control filesystem each connection has a directory
 named by a unique number.
@@ -176,7 +219,7 @@ How do non-privileged mounts work?
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Since the mount() system call is a privileged operation, a helper
-program (fusermount3) is needed, which is installed setuid root.
+program (fusermount) is needed, which is installed setuid root.
 
 The implication of providing non-privileged mounts is that the mount
 owner must not be able to use this capability to compromise the
@@ -204,7 +247,7 @@ How are requirements fulfilled?
 
     The solution is not to allow opening device files and ignore
     setuid and setgid bits when executing programs.  To ensure this
-    fusermount3 always adds "nosuid" and "nodev" to the mount options
+    fusermount always adds "nosuid" and "nodev" to the mount options
     for non-privileged mounts.
 
  B) If another user is accessing files or directories in the
@@ -222,7 +265,7 @@ How are requirements fulfilled?
         owner could otherwise not be able to modify (or could only
         make limited modifications).
 
-        This is solved in fusermount3, by checking the access
+        This is solved in fusermount, by checking the access
         permissions on the mountpoint and only allowing the mount if
         the mount owner can do unlimited modification (has write
         access to the mountpoint, and mountpoint is not a "sticky"
