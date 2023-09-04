@@ -1,4 +1,4 @@
-fuse (2.9.9-6) unstable; urgency=medium
+fuse (2.9.9) unstable; urgency=medium
 
   * Disable link time optimization (closes: #1015408).
   * Update Lintian overrides.
