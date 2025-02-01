@@ -1,3 +1,7 @@
+fused (1.0.0) unstable; urgency=medium
+  [ Erik Ziegenbalg ]
+  * Elster OS
+
 fused (1.0.0-3) unstable; urgency=medium
   [ Jeff Olivier ]
   * Removes rpm dependence on fused
